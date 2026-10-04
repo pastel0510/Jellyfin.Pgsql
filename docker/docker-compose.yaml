@@ -1,7 +1,7 @@
 services:
   # no port exposed -- use a reverse proxy to jellyfin:8096/tcp or expose port 8096/tcp
   jellyfin:
-    build: /path/to/jellyfin-postgres/build # path where Dockerfile will be stored
+    image: ghcr.io/pastel0510/jellyfin.pgsql:12.1-1 # or build: /path/to/Jellyfin.Pgsql with dockerfile: docker/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -26,16 +26,18 @@ services:
       POSTGRES_USER: jellyfin
       PGUSER: jellyfin
     image: postgres:18
+    shm_size: 256mb # the default 64MB /dev/shm is too small for parallel queries
+    stop_grace_period: 1m
     healthcheck:
+      # -h 127.0.0.1: only report healthy once the real server listens on TCP, not the init-time socket-only server
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
+      timeout: 5s
       retries: 5
       start_period: 30s
-      test:
-        - CMD
-        - pg_isready
-      timeout: 10s
     restart: unless-stopped
 #    user: 'uid:gid' set a different non-root user to run postgres
     volumes:
+      # PostgreSQL 18 images keep PGDATA in /var/lib/postgresql/18/docker: mount /var/lib/postgresql, not .../data
       - /path/to/jellyfin-postgres/postgres-data:/var/lib/postgresql
       - /path/to/jellyfin-postgres/postgres-wal:/var/lib/postgresql-wal

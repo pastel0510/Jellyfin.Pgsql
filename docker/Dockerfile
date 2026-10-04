@@ -1,7 +1,10 @@
+# syntax=docker/dockerfile:1
 # Build stage
 # Context hint: project root ../
-# sudo docker build -t ghcr.io/jpvenson/jellyfin.pgsql:10.11.0-1 -f ./Dockerfile ../
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+# sudo docker build -t ghcr.io/pastel0510/jellyfin.pgsql:12.1-1 -f ./Dockerfile ../
+# The plugin is a framework-dependent, RID-neutral net10.0 library, so it is built once on the
+# native build platform and reused for every target architecture (no QEMU for the compile).
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Copy project files
@@ -10,21 +13,29 @@ COPY Jellyfin.Plugin.Pgsql.sln .
 COPY build.yaml .
 COPY Jellyfin.Plugin.Pgsql/ ./Jellyfin.Plugin.Pgsql/
 
-# Restore and publish
+# Restore and publish (no --runtime: output is identical for amd64/arm64)
 RUN dotnet restore Jellyfin.Plugin.Pgsql.sln
 RUN dotnet publish Jellyfin.Plugin.Pgsql.sln -c Release --no-restore -o /app/publish
 
 # Final stage - Jellyfin with plugin
 FROM jellyfin/jellyfin:12.1
 
-# Install PostgreSQL 18 client tools for backup/restore functionality
-RUN apt-get update && \
-    apt-get install -y wget ca-certificates gnupg lsb-release && \
-    wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
-    apt-get update && \
-    apt-get install -y postgresql-client-18 xmlstarlet && \
-    apt-get clean && \
+# Install the PostgreSQL 18 client tools (pg_dump/psql) used for the pre-migration backup/restore.
+# pg_dump refuses to dump a server newer than itself, so this major version is the newest
+# PostgreSQL server the image can back up. Uses the PGDG repo for the base image's Debian release
+# in deb822 format; apt reads the ASCII-armored key directly, so gnupg is not needed.
+RUN set -eux; \
+    . /etc/os-release; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl; \
+    install -d /usr/share/postgresql-common/pgdg; \
+    curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc; \
+    printf 'Types: deb\nURIs: https://apt.postgresql.org/pub/repos/apt\nSuites: %s-pgdg\nComponents: main\nSigned-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc\n' "${VERSION_CODENAME}" \
+        > /etc/apt/sources.list.d/pgdg.sources; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends postgresql-client-18 xmlstarlet; \
+    pg_dump --version; \
+    apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the published plugin and config files
