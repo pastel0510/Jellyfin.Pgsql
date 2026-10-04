@@ -5,72 +5,114 @@ on:
     types:
       - released
   workflow_dispatch:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'docker/**'
+      - 'Jellyfin.Plugin.Pgsql/**'
+      - '.github/workflows/docker.yaml'
+
+permissions: {}
+
+# Serialise publishes so two runs can't compute the same rolling tag.
+concurrency:
+  group: docker-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+    env:
+      PUSH: ${{ github.event_name != 'pull_request' }}
+      DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Determine image version
+      - name: Determine image name and version
         id: version
         env:
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          # GHCR image names must be lowercase; derive from the repo owner so forks publish to their own namespace.
+          IMAGE="ghcr.io/${OWNER,,}/jellyfin.pgsql"
+
           # Extract the Jellyfin base version from the Dockerfile (handles optional AS alias)
           JELLYFIN_VERSION=$(grep -oP '(?<=FROM jellyfin/jellyfin:)[^\s]+' docker/Dockerfile | head -1)
-          echo "jellyfin_version=$JELLYFIN_VERSION" >> "$GITHUB_OUTPUT"
 
-          # Query existing package versions from GHCR via the GitHub API
-          EXISTING_TAGS=$(gh api /users/jpvenson/packages/container/jellyfin.pgsql/versions \
-            --paginate --jq '.[].metadata.container.tags[]' 2>/dev/null) \
-            || { echo "Warning: could not query GHCR tags, defaulting rolling number to 1"; EXISTING_TAGS=""; }
+          EXISTING_TAGS=""
+          if [[ "$PUSH" == "true" ]]; then
+            # List existing tags straight from the registry (works for user and org owners alike).
+            if OUT=$(skopeo list-tags --creds "${ACTOR}:${GH_TOKEN}" "docker://${IMAGE}" 2>err.txt); then
+              EXISTING_TAGS=$(jq -r '.Tags[]' <<<"$OUT")
+            elif grep -qiE 'name unknown|not found|404|denied|unauthorized' err.txt; then
+              echo "::notice::No existing ${IMAGE} package found, assuming first publish"
+            else
+              cat err.txt
+              exit 1
+            fi
+          fi
 
           # Find the highest rolling number already published for this Jellyfin version.
           # Escape dots in the version so they are treated as literals in the regex.
           ESCAPED_VERSION=$(printf '%s' "$JELLYFIN_VERSION" | sed 's/[.]/\\./g')
-          MAX_ROLLING=$(echo "$EXISTING_TAGS" \
-            | grep -oP "^${ESCAPED_VERSION}-\K[0-9]+$" \
-            | sort -n | tail -1)
+          MAX_ROLLING=$(grep -oP "^${ESCAPED_VERSION}-\K[0-9]+$" <<<"$EXISTING_TAGS" | sort -n | tail -1 || true)
 
-          NEXT=$(( ${MAX_ROLLING:-0} + 1 ))
-          IMAGE_TAG="${JELLYFIN_VERSION}-${NEXT}"
+          IMAGE_TAG="${JELLYFIN_VERSION}-$(( ${MAX_ROLLING:-0} + 1 ))"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-          echo "Computed image tag: $IMAGE_TAG"
+          echo "Computed image: ${IMAGE}:${IMAGE_TAG}"
 
-          # Build full tag list; include 'latest' on release events
-          TAGS="ghcr.io/jpvenson/jellyfin.pgsql:${IMAGE_TAG}"
-          if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
-            TAGS="${TAGS}"$'\n'"ghcr.io/jpvenson/jellyfin.pgsql:latest"
-          fi
-          # Use a multiline-safe delimiter for the output
-          {
-            echo "tags<<EOF"
-            echo "$TAGS"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.version.outputs.image }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ steps.version.outputs.image_tag }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+          labels: |
+            org.opencontainers.image.title=Jellyfin PostgreSQL
+            org.opencontainers.image.description=Jellyfin with the experimental PostgreSQL database provider plugin
+          annotations: |
+            org.opencontainers.image.description=Jellyfin with the experimental PostgreSQL database provider plugin
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.10.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3.4.0
+        if: env.PUSH == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6.15.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile
-          push: true
-          tags: ${{ steps.version.outputs.tags }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max

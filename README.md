@@ -15,7 +15,7 @@ This plugin adds postgres SQL support to [Jellyfin Server](https://github.com/je
 
 # How to use it
 
-You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/jpvenson/jellyfin.pgsql:12.1-1`.
+You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/pastel0510/jellyfin.pgsql:12.1-1`.
 
 You need to add the connection parameters as enviornment variables in your compose file:
 
@@ -23,7 +23,7 @@ You need to add the connection parameters as enviornment variables in your compo
 
 services:
   jellyfin:
-    image: ghcr.io/jpvenson/jellyfin.pgsql:12.1-1
+    image: ghcr.io/pastel0510/jellyfin.pgsql:12.1-1
     volumes:
         - /path/to/config:/config
         - /path/to/cache:/cache
@@ -41,6 +41,19 @@ services:
       # Raise it if large libraries hit query timeouts.
       # - POSTGRES_COMMAND_TIMEOUT=120
 ```
+
+## PostgreSQL version
+
+The image is built on Jellyfin 12.1 and ships the PostgreSQL 18 client tools. Jellyfin takes a `pg_dump` backup before
+every database migration, and `pg_dump` refuses to dump a server newer than itself, so use a PostgreSQL server
+**version 18 or older** (18 recommended; see [`docker/docker-compose.yaml`](docker/docker-compose.yaml)).
+
+With the official `postgres:18` image, mount the data volume at `/var/lib/postgresql` (not `/var/lib/postgresql/data`
+as with older images), or the data will not persist.
+
+Backups contain the `\restrict` lines added by pg_dump 18, so restore them by hand only with psql 18 (or 17.6+).
+
+Configuration comes from the `ConnectionString` in `database.xml`, and any `POSTGRES_*` environment variables override it.
 
 # Build
 

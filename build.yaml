@@ -14,4 +14,4 @@ owner: "jellyfin"
 artifacts:
 - "Jellyfin.Plugin.Pgsql.dll"
 changelog: >
-  Initial PostgreSQL database provider implementation
+  Jellyfin 12.1 support, PostgreSQL 18 client tools, multi-arch Docker image

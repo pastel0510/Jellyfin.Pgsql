@@ -187,12 +187,14 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         // ON_ERROR_STOP, psql skipped those errors and exited 0, so a "successful" restore brought back the migration
         // history but not the schema, and every later start failed. So restore into an emptied public schema, in one
         // transaction: any error rolls the whole restore back, including the schema drop, and fails loudly below.
+        // The schema is recreated the way PostgreSQL 15+ creates it (owned by pg_database_owner, USAGE for PUBLIC),
+        // so the database owner can still create tables in it.
         var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = "psql",
-                Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --no-password --quiet --set=ON_ERROR_STOP=1 --single-transaction --command=\"DROP SCHEMA public CASCADE; CREATE SCHEMA public;\" --file=\"{backupFile}\"",
+                Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --no-password --quiet --set=ON_ERROR_STOP=1 --single-transaction --command=\"DROP SCHEMA public CASCADE; CREATE SCHEMA public AUTHORIZATION pg_database_owner; GRANT USAGE ON SCHEMA public TO PUBLIC;\" --file=\"{backupFile}\"",
                 Environment = { ["PGPASSWORD"] = connectionBuilder.Password, ["PGSSLMODE"] = ToLibpqSslMode(connectionBuilder.SslMode) },
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
