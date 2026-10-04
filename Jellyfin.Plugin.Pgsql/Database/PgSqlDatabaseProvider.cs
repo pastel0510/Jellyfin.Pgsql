@@ -26,6 +26,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     private const string BackupFolderName = "PgsqlBackups";
     private readonly ILogger<PgSqlDatabaseProvider> _logger;
     private readonly IApplicationPaths _applicationPaths;
+    private string? _configuredConnectionString;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PgSqlDatabaseProvider"/> class.
@@ -45,6 +46,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     public void Initialise(DbContextOptionsBuilder options, DatabaseConfigurationOptions databaseConfiguration)
     {
         var customOptions = databaseConfiguration.CustomProviderOptions?.Options;
+        _configuredConnectionString = databaseConfiguration.CustomProviderOptions?.ConnectionString;
 
         var connectionBuilder = GetConnectionBuilder(customOptions);
         connectionBuilder.ApplicationName = $"jellyfin+{FileVersionInfo.GetVersionInfo(Assembly.GetEntryAssembly()!.Location).FileVersion}";
@@ -135,7 +137,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             {
                 FileName = "pg_dump",
                 Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --file=\"{backupFile}\" --no-password --verbose --clean --if-exists",
-                Environment = { ["PGPASSWORD"] = connectionBuilder.Password },
+                Environment = { ["PGPASSWORD"] = connectionBuilder.Password, ["PGSSLMODE"] = ToLibpqSslMode(connectionBuilder.SslMode) },
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -191,7 +193,7 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             {
                 FileName = "psql",
                 Arguments = $"--host={connectionBuilder.Host} --port={connectionBuilder.Port} --username={connectionBuilder.Username} --dbname={connectionBuilder.Database} --no-password --quiet --set=ON_ERROR_STOP=1 --single-transaction --command=\"DROP SCHEMA public CASCADE; CREATE SCHEMA public;\" --file=\"{backupFile}\"",
-                Environment = { ["PGPASSWORD"] = connectionBuilder.Password },
+                Environment = { ["PGPASSWORD"] = connectionBuilder.Password, ["PGSSLMODE"] = ToLibpqSslMode(connectionBuilder.SslMode) },
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -270,23 +272,55 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         return converter(value.Value);
     }
 
+    private static string? GetEnvironmentVariable(string name)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private static string ToLibpqSslMode(SslMode sslMode) => sslMode switch
+    {
+        SslMode.Disable => "disable",
+        SslMode.Allow => "allow",
+        SslMode.Require => "require",
+        SslMode.VerifyCA => "verify-ca",
+        SslMode.VerifyFull => "verify-full",
+        _ => "prefer"
+    };
+
     private NpgsqlConnectionStringBuilder GetConnectionBuilder(ICollection<CustomDatabaseOption>? options)
     {
         var includeErrorDetail = GetCustomDatabaseOption(options, "IncludeErrorDetail", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => false);
         var logParameters = GetCustomDatabaseOption(options, "LogParameters", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => false);
 
-        var connectionBuilder = new NpgsqlConnectionStringBuilder
-        {
-            Host = Environment.GetEnvironmentVariable("POSTGRES_HOST") ?? "jellyfin",
-            Port = int.Parse(Environment.GetEnvironmentVariable("POSTGRES_PORT") ?? "5432", CultureInfo.InvariantCulture),
-            Database = Environment.GetEnvironmentVariable("POSTGRES_DB") ?? "jellyfin",
-            Username = Environment.GetEnvironmentVariable("POSTGRES_USER") ?? "jellyfin",
-            Password = Environment.GetEnvironmentVariable("POSTGRES_PASSWORD") ?? throw new InvalidOperationException("PostgreSQL password must be provided via POSTGRES_PASSWORD environment variable"),
+        // Start from the connection string configured in database.xml (if any) and let the
+        // POSTGRES_* environment variables override individual values.
+        var connectionBuilder = new NpgsqlConnectionStringBuilder(_configuredConnectionString ?? string.Empty);
+        connectionBuilder.Host = GetEnvironmentVariable("POSTGRES_HOST") ?? connectionBuilder.Host ?? "jellyfin";
+        connectionBuilder.Database = GetEnvironmentVariable("POSTGRES_DB") ?? connectionBuilder.Database ?? "jellyfin";
+        connectionBuilder.Username = GetEnvironmentVariable("POSTGRES_USER") ?? connectionBuilder.Username ?? "jellyfin";
+        connectionBuilder.Password = GetEnvironmentVariable("POSTGRES_PASSWORD") ?? connectionBuilder.Password
+            ?? throw new InvalidOperationException("PostgreSQL password must be provided via the POSTGRES_PASSWORD environment variable or the connection string in database.xml");
 
-            // Command timeout in seconds (0 = no limit). Defaults to Npgsql's 30s.
-            // Raise it via POSTGRES_COMMAND_TIMEOUT for slow queries on large libraries.
-            CommandTimeout = int.Parse(Environment.GetEnvironmentVariable("POSTGRES_COMMAND_TIMEOUT") ?? "30", CultureInfo.InvariantCulture)
-        };
+        var port = GetEnvironmentVariable("POSTGRES_PORT");
+        if (port is not null)
+        {
+            connectionBuilder.Port = int.Parse(port, CultureInfo.InvariantCulture);
+        }
+
+        // Command timeout in seconds (0 = no limit). Defaults to Npgsql's 30s.
+        // Raise it via POSTGRES_COMMAND_TIMEOUT for slow queries on large libraries.
+        var commandTimeout = GetEnvironmentVariable("POSTGRES_COMMAND_TIMEOUT");
+        if (commandTimeout is not null)
+        {
+            connectionBuilder.CommandTimeout = int.Parse(commandTimeout, CultureInfo.InvariantCulture);
+        }
+
+        var sslMode = GetEnvironmentVariable("POSTGRES_SSLMODE");
+        if (sslMode is not null)
+        {
+            connectionBuilder.SslMode = Enum.Parse<SslMode>(sslMode, ignoreCase: true);
+        }
 
         if (includeErrorDetail)
         {
