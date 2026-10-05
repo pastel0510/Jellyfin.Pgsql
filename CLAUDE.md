@@ -25,5 +25,7 @@ built on `jellyfin/jellyfin`.
 - The pg_dump/psql arguments in `scripts/smoke-test.sh` mirror `PgSqlDatabaseProvider`; keep them in sync.
 - Keep PostgreSQL behaving like SQLite where Jellyfin depends on it (NULL ordering, `DateTime.MinValue`, no JIT; see
   "Differences from SQLite" in the README). The smoke test checks these.
+- Every merge to master that changes the plugin or Docker files is published automatically (Docker workflow after
+  Verify): `12.1-<n>` plus the moving `12.1` and `latest` tags. Docs refer to the moving tag.
 - No emoji anywhere in the repository (code, docs, workflow names, commit messages, PR texts); keep the tone plain and
   professional. `scripts/verify.sh` fails on emoji.
