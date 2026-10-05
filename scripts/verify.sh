@@ -2,8 +2,10 @@
 # Full verification of the plugin: build, EF Core migration check, Docker image build and smoke test.
 # Used by CI and by the automated Jellyfin update workflow; run it locally the same way:
 #
-#   scripts/verify.sh                 everything
+#   scripts/verify.sh                 build, migration check, Docker build, smoke test
 #   SKIP_DOCKER=1 scripts/verify.sh   build + migration check only
+#   FULL=1 scripts/verify.sh          also the linuxserver-layout smoke test and the SQLite migration test
+#                                     (needs sqlite3, psql and pgloader)
 #
 # Environment: IMAGE (default jellyfin-pgsql:verify), DOCKERFILE (default docker/Dockerfile), plus the
 # variables of scripts/smoke-test.sh (UPGRADE_FROM, PG_IMAGE, EXPECT_VERSION, LOG_DIR).
@@ -42,5 +44,13 @@ docker build -f "$DOCKERFILE" -t "$IMAGE" .
 
 echo "==> Smoke testing $IMAGE"
 scripts/smoke-test.sh
+
+if [[ -n "${FULL:-}" ]]; then
+    echo "==> Smoke testing $IMAGE with the linuxserver layout as a non-root user"
+    UPGRADE_FROM="" LAYOUT=linuxserver LOG_DIR="${LOG_DIR:-smoke-logs}/linuxserver" scripts/smoke-test.sh
+
+    echo "==> Testing the SQLite to PostgreSQL migration"
+    LOG_DIR="${LOG_DIR:-smoke-logs}/migration" scripts/migration-test.sh
+fi
 
 echo "VERIFY PASSED"

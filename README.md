@@ -24,36 +24,59 @@ This plugin adds postgres SQL support to [Jellyfin Server](https://github.com/je
 
 You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/pastel0510/jellyfin.pgsql:12.1-1`.
 
-You need to add the connection parameters as enviornment variables in your compose file:
+You need to add the connection parameters as environment variables in your compose file:
 
 ```yaml
-
 services:
   jellyfin:
     image: ghcr.io/pastel0510/jellyfin.pgsql:12.1-1
     volumes:
-        - /path/to/config:/config
-        - /path/to/cache:/cache
-        - /path/to/media:/media
+      - /path/to/config:/config
+      - /path/to/cache:/cache
+      - /path/to/media:/media
     environment:
-        - POSTGRES_HOST=
-        - POSTGRES_PORT=
-        - POSTGRES_DB=jellyfin
-        - POSTGRES_USER=jellyfin
-        - POSTGRES_PASSWORD=jellyfin
-      # Optional settings bellow, uncomment if you want to connect using SSL
-      # - POSTGRES_SSLMODE=Require
-      # - POSTGRES_TRUSTSERVERCERTIFICATE=true  (ignored by current Npgsql; "Require" does not validate the certificate)
-      # Optional: per-command timeout in seconds (default 30, 0 = no limit).
-      # Raise it if large libraries hit query timeouts.
-      # - POSTGRES_COMMAND_TIMEOUT=120
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PASSWORD=change-me
+      # Optional, with their defaults:
+      # - POSTGRES_PORT=5432
+      # - POSTGRES_DB=jellyfin
+      # - POSTGRES_USER=jellyfin
+      # - POSTGRES_SSLMODE=Require              # Disable, Allow, Prefer, Require, VerifyCA or VerifyFull
+      # - POSTGRES_COMMAND_TIMEOUT=30           # seconds per command, 0 = no limit; raise for very large libraries
+      # - POSTGRES_JIT=off                      # see "Differences from SQLite"
+      # - POSTGRES_REVERSE_NULL_ORDERING=true   # see "Differences from SQLite"
 ```
+
+The password is only read from the environment. On every start the entrypoint records the other connection settings in
+`database.xml`; the password is never written to disk.
+
+### Configuration paths and running as a non-root user
+
+The entrypoint installs the plugin into `$JELLYFIN_DATA_DIR/plugins/PostgreSQL` and writes `$JELLYFIN_CONFIG_DIR/database.xml`,
+the places Jellyfin reads them from. The image's defaults are `JELLYFIN_DATA_DIR=/config` and
+`JELLYFIN_CONFIG_DIR=/config/config`. To keep the layout of the linuxserver.io image (for example when moving an existing
+linuxserver install over), set:
+
+```yaml
+    user: "1000:1000"   # the owner of your config volume (linuxserver's PUID:PGID)
+    environment:
+      - HOME=/config
+      - JELLYFIN_DATA_DIR=/config/data
+      - JELLYFIN_CONFIG_DIR=/config
+      - JELLYFIN_CACHE_DIR=/config/cache
+      - JELLYFIN_LOG_DIR=/config/log
+```
+
+The image runs as root by default and then leaves root-owned files in `/config`; running it as the volume's owner with
+`user:` works without further changes, including hardware transcoding through `/dev/dri` when that user may access it.
 
 ## PostgreSQL version
 
 The image is built on Jellyfin 12.1 and ships the PostgreSQL 18 client tools. Jellyfin takes a `pg_dump` backup before
 every database migration, and `pg_dump` refuses to dump a server newer than itself, so use a PostgreSQL server
-**version 18 or older** (18 recommended; see [`docker/docker-compose.yaml`](docker/docker-compose.yaml)).
+**version 18 or older** (18 recommended; see [`docker/docker-compose.yaml`](docker/docker-compose.yaml)). PostgreSQL 16 is
+confirmed working, including with a non-superuser role that owns the database, and on a 3-instance CloudNativePG cluster
+that survived a switchover without restarting Jellyfin.
 
 With the official `postgres:18` image, mount the data volume at `/var/lib/postgresql` (not `/var/lib/postgresql/data`
 as with older images), or the data will not persist.
@@ -61,6 +84,30 @@ as with older images), or the data will not persist.
 Backups contain the `\restrict` lines added by pg_dump 18, so restore them by hand only with psql 18 (or 17.6+).
 
 Configuration comes from the `ConnectionString` in `database.xml`, and any `POSTGRES_*` environment variables override it.
+
+## Differences from SQLite
+
+Jellyfin's queries were written for SQLite. The plugin adjusts PostgreSQL so results match:
+
+- **JIT is turned off** for Jellyfin's connections (`-c jit=off`). PostgreSQL's JIT compiler spent over 20 seconds on
+  every execution of the "continue watching" query (`/UserItems/Resume`: 0.2 s without JIT, about 60 s with it) and
+  never pays off for Jellyfin's short, index-driven lookups. `POSTGRES_JIT=on`, or a `jit` setting in the
+  connection string, keeps the server's default. If a connection pooler such as PgBouncer rejects the `options` startup
+  parameter, set `POSTGRES_JIT=on` and run `ALTER DATABASE jellyfin SET jit = off;` instead.
+- **NULLs sort like in SQLite**: first in ascending and last in descending order (PostgreSQL's default is the
+  opposite), so lists such as "continue watching", next up and sorting by rating or date come back in the same order.
+  `POSTGRES_REVERSE_NULL_ORDERING=false` turns this off.
+- **`DateTime.MinValue` is stored as `0001-01-01`**, not `-infinity`, so Jellyfin's date arithmetic in queries works
+  (sorting by premiere date for items with only a production year). Values stored as infinity by earlier versions are
+  converted by a database migration on the first start.
+
+Expected differences that are not bugs:
+
+- PostgreSQL stores timestamps with microsecond precision, .NET and SQLite with 100 ns ticks, so values lose their
+  last digit. Image tags are derived from such timestamps, so after migrating from SQLite every image tag changes once
+  and clients download each image again a single time.
+- Items with an equal sort key (two movies with the same rating) can come back in a different order; neither database
+  defines the order of ties.
 
 ## Automated Jellyfin updates
 
@@ -127,18 +174,39 @@ To create a new release, first sync all Jellyfin server changes then create a ne
 `dotnet ef migrations bundle -o docker/jellyfin.PgsqlMigrator.dll -r linux-x64 --self-contained --project "/workspaces/Jellyfin.Pgsql/Jellyfin.Plugin.Pgsql" --  --migration-provider Jellyfin-PgSql`
 Then build the container.
 
-# Migration Instructions (ADVANCED, UNTESTED)
+# Migrating from SQLite
 
-To migrate your existing Jellyfin instance to a custom database (not using the docker image) follow the steps IN THIS ORDER.
+[`scripts/migrate-sqlite-to-postgres.sh`](scripts/migrate-sqlite-to-postgres.sh) copies an existing Jellyfin SQLite
+database into PostgreSQL and checks the result. It is tested end to end in CI by
+[`scripts/migration-test.sh`](scripts/migration-test.sh), and was used to migrate a real library (84,000 items, 716,000
+rows) with identical counts, watch state and sort orders. It needs `sqlite3`, `psql` and `pgloader` (or Docker with
+`PGLOADER_IMAGE=ghcr.io/dimitri/pgloader:latest`). Use the same Jellyfin version on both sides, and keep a backup of your
+config directory.
 
-1. Download the Jellyfin PGSQL container and configure it to point to an existing empty database and empty config directory. DO NOT USE YOUR EXISTING DATA OR SQLITE LIBRARY CONFIGURE A FULLY CLEAR INSTANCE.
-2. Run Jellyfin once with it configured to your empty database, this will seed the database and its migration history.
-3. Stop your Jellyfin instance after it has been started once (no need to fully configure it via the setup wizard). If you did not get the setup wizard then you did something wrong!
-4. Install the pgloader tool `apt install pgloader` or see https://pgloader.readthedocs.io/en/latest/install.html.
-5. Download the [jellyfindb.load](/docker/jellyfindb.load) file
-6. Adapt the `jellyfindb.load` file accordingly to point towards your old jellyfin.db and your postgres instance. See https://pgloader.readthedocs.io/en/latest/ref/sqlite.html
-7. Use the load file in `jellyfindb.load` to transfer your sqlite db into the postgres db like `pgloader /jellyfin-pgsql/jellyfindb.load`.
-8. Move your old Data back to the Jellyfin directories
-9. Start Jellyfin
+1. **Stop Jellyfin.** Work on a copy of your config directory if you can.
+2. **Seed the PostgreSQL database.** Start this image once against the empty database with an **empty** config
+   directory, wait for `Startup complete` in the log (or the setup wizard), then stop it. This creates the schema and
+   its migration history. Do not run the setup wizard.
+3. **Migrate:**
 
-If you get an error regarding a missing `__EFMigrationsHistory` you did not start Jellyfin with a clear state.
+   ```sh
+   POSTGRES_HOST=postgres POSTGRES_DB=jellyfin POSTGRES_USER=jellyfin POSTGRES_PASSWORD=... \
+       scripts/migrate-sqlite-to-postgres.sh /path/to/config/data/jellyfin.db
+   ```
+
+   The database is `data/jellyfin.db` with the jellyfin/jellyfin image and `data/data/jellyfin.db` with the linuxserver
+   image. The script only reads it: it works on a consistent copy (WAL checkpointed, `integrity_check` must pass),
+   checks both databases have the same tables, converts array columns from SQLite's JSON form, trims strings that
+   exceed PostgreSQL's length limits, loads the data with pgloader, resets the identity sequences, runs `ANALYZE`,
+   and verifies every table's row count and every constraint and index. It stops with an error if anything does
+   not match; pgloader's own exit code is not relied on.
+4. **Switch the config to PostgreSQL:** move the SQLite settings aside with
+   `mv config/database.xml config/database.xml.sqlite` (`/config/database.xml` with the linuxserver layout), and rename
+   the old database so a misconfigured start fails instead of quietly using SQLite:
+   `mv data/jellyfin.db data/jellyfin.db.migrated`.
+5. **Start this image** with your existing config, data and media paths (see
+   [Configuration paths](#configuration-paths-and-running-as-a-non-root-user) for linuxserver layouts) and check the log
+   for `PgSqlDatabaseProvider: PostgreSQL connection string`.
+
+[`docker/jellyfindb.load`](docker/jellyfindb.load) is the pgloader load file for doing step 3 by hand; the script
+generates the same file and does the steps around it.

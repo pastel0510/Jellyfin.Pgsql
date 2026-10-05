@@ -12,6 +12,7 @@ using Jellyfin.Database.Implementations.DbConfiguration;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Configuration;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 
@@ -37,6 +38,12 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     {
         _applicationPaths = applicationPaths;
         _logger = logger;
+
+        // Store DateTime.MinValue/MaxValue as 0001-01-01/9999-12-31 like SQLite does, not as -infinity/infinity:
+        // Jellyfin does date arithmetic on them in SQL (e.g. the PremiereDate sort adds years to MinValue), and
+        // -infinity plus any interval stays -infinity. Must be set before Npgsql's first type mapping; values
+        // already stored as infinity are converted by the Jellyfin12.1_DateTimeInfinity migration.
+        AppContext.SetSwitch("Npgsql.DisableDateTimeInfinityConversions", true);
     }
 
     /// <inheritdoc/>
@@ -56,6 +63,12 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             {
                 pgSqlOptions.MigrationsAssembly(GetType().Assembly.FullName);
             });
+
+        // Order NULLs like SQLite (first ascending, last descending), which Jellyfin's sort orders assume.
+        if (!IsFalse(GetEnvironmentVariable("POSTGRES_REVERSE_NULL_ORDERING")))
+        {
+            options.ReplaceService<IQuerySqlGeneratorFactory, SqliteNullOrderingQuerySqlGeneratorFactory>();
+        }
 
         var enableSensitiveDataLogging = GetCustomDatabaseOption(customOptions, "EnableSensitiveDataLogging", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => false);
         if (enableSensitiveDataLogging)
@@ -280,6 +293,16 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         return string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
+    private static bool IsTrue(string? value)
+        => value is not null && (value.Equals("on", StringComparison.OrdinalIgnoreCase)
+            || value.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase)
+            || value.Equals("1", StringComparison.Ordinal));
+
+    private static bool IsFalse(string? value)
+        => value is not null && (value.Equals("off", StringComparison.OrdinalIgnoreCase)
+            || value.Equals(bool.FalseString, StringComparison.OrdinalIgnoreCase)
+            || value.Equals("0", StringComparison.Ordinal));
+
     private static string ToLibpqSslMode(SslMode sslMode) => sslMode switch
     {
         SslMode.Disable => "disable",
@@ -322,6 +345,17 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         if (sslMode is not null)
         {
             connectionBuilder.SslMode = Enum.Parse<SslMode>(sslMode, ignoreCase: true);
+        }
+
+        // PostgreSQL's JIT compiler costs seconds on every execution of Jellyfin's large correlated queries
+        // (/UserItems/Resume went from 0.2 s to about 60 s) and never pays off for its short index lookups.
+        // Turn it off for this connection unless POSTGRES_JIT=on or the configured connection string sets jit.
+        if (!IsTrue(GetEnvironmentVariable("POSTGRES_JIT"))
+            && !(connectionBuilder.Options?.Contains("jit=", StringComparison.OrdinalIgnoreCase) ?? false))
+        {
+            connectionBuilder.Options = string.IsNullOrWhiteSpace(connectionBuilder.Options)
+                ? "-c jit=off"
+                : connectionBuilder.Options + " -c jit=off";
         }
 
         if (includeErrorDetail)
