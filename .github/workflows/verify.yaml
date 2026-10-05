@@ -46,7 +46,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: .github/scripts/previous_image.sh "ghcr.io/${OWNER,,}/jellyfin.pgsql" >> "$GITHUB_ENV"
 
-      - name: Build, check migrations and smoke test
+      - name: Install migration test tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends pgloader sqlite3
+
+      - name: Build, check migrations, smoke and migration tests
+        env:
+          FULL: '1'
         run: scripts/verify.sh
 
       - name: Upload smoke test logs

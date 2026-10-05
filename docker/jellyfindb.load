@@ -1,6 +1,11 @@
+-- pgloader load file for a manual SQLite to PostgreSQL migration. scripts/migrate-sqlite-to-postgres.sh generates
+-- this file itself and also does the steps pgloader cannot: a consistent copy of jellyfin.db, converting array
+-- columns, trimming over-length strings, resetting identity sequences, ANALYZE and verifying row counts. See the
+-- README. Point "from" at a copy of jellyfin.db, never the live file, and pass the password in PGPASSWORD.
 load database
-    from sqlite:///config/data/jellyfin.db
-    into pgsql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+    from sqlite:///path/to/copy/of/jellyfin.db
+    into postgresql://jellyfin@postgres-host:5432/jellyfin
 
-with quote identifiers, data only, truncate, drop indexes
-excluding table names like '__EFMigrationsHistory'
+with quote identifiers, data only, truncate, drop indexes, reset no sequences
+
+excluding table names like '__EFMigrationsHistory', '__EFMigrationsLock';

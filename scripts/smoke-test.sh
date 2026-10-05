@@ -11,6 +11,8 @@
 #   EXPECT_VERSION  optional Jellyfin version IMAGE must report (e.g. 12.1.0)
 #   LOG_DIR         where container logs are written (default ./smoke-logs)
 #   PORT            host port for Jellyfin (default 8096)
+#   LAYOUT          "jellyfin" (default): the image's own paths, running as root. "linuxserver": the
+#                   linuxserver.io paths (data /config/data, config /config) as a non-root user (uid 3000)
 #   KEEP            if set, leave the containers running afterwards for debugging
 set -euo pipefail
 
@@ -26,7 +28,31 @@ BASE="http://127.0.0.1:$PORT"
 AUTH_HEADER='MediaBrowser Client="smoke-test", Device="ci", DeviceId="smoke-test", Version="1.0"'
 USER_NAME="smoke"
 USER_PASS="smoke-test-password"
-MOVIE="Smoke Test (2020)"
+LAYOUT="${LAYOUT:-jellyfin}"
+# The PremiereDate sort exercises two SQLite compatibility fixes: the undated movie must come first (NULLs first
+# when ascending) and the year-only movies must be ordered by year (DateTime.MinValue + years, not -infinity).
+MOVIES=("Undated Test" "Older Test (2010)" "Smoke Test (2020)")
+EXPECTED_PREMIERE_ORDER="Undated Test,Older Test (2010),Smoke Test (2020)"
+
+case "$LAYOUT" in
+    jellyfin)
+        LAYOUT_ARGS=()
+        DATABASE_XML=/config/config/database.xml
+        ;;
+    linuxserver)
+        LAYOUT_ARGS=(--user 3000:3000 -e HOME=/config -e JELLYFIN_DATA_DIR=/config/data -e JELLYFIN_CONFIG_DIR=/config
+            -e JELLYFIN_CACHE_DIR=/config/cache -e JELLYFIN_LOG_DIR=/config/log)
+        DATABASE_XML=/config/database.xml
+        ;;
+    *)
+        echo "Unknown LAYOUT '$LAYOUT' (use jellyfin or linuxserver)" >&2
+        exit 2
+        ;;
+esac
+if [[ "$LAYOUT" != "jellyfin" && -n "${UPGRADE_FROM:-}" ]]; then
+    echo "LAYOUT=$LAYOUT cannot be combined with UPGRADE_FROM (older images only support the jellyfin layout)" >&2
+    exit 2
+fi
 
 mkdir -p "$LOG_DIR"
 step() { echo "::group::$*" 2>/dev/null || true; echo "==> $*"; }
@@ -57,7 +83,7 @@ psql_q() { docker exec -e PGPASSWORD=jellyfin "$PG" psql -U jellyfin -d jellyfin
 start_jellyfin() {
     local image="$1"
     docker rm -f "$JF" >/dev/null 2>&1 || true
-    docker run -d --name "$JF" --network "$NET" -p "127.0.0.1:$PORT:8096" \
+    docker run -d --name "$JF" --network "$NET" -p "127.0.0.1:$PORT:8096" "${LAYOUT_ARGS[@]}" \
         -e POSTGRES_HOST="$PG" -e POSTGRES_PORT=5432 -e POSTGRES_DB=jellyfin \
         -e POSTGRES_USER=jellyfin -e POSTGRES_PASSWORD=jellyfin \
         -v "$NAME-config:/config" -v "$NAME-media:/media:ro" "$image" >/dev/null
@@ -102,14 +128,14 @@ add_library_and_scan() {
 
 wait_for_movie() {
     for _ in $(seq 1 90); do
-        if [[ "$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie' | jq '.TotalRecordCount')" -ge 1 ]]; then
+        if [[ "$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie' | jq '.TotalRecordCount')" -ge "${#MOVIES[@]}" ]]; then
             return 0
         fi
         sleep 2
     done
     echo "libraries: $(api GET /Library/VirtualFolders | jq -c '[.[] | {Name, Locations}]')" >&2
     docker exec "$JF" ls -laR /media >&2 || true
-    fail "library scan did not produce the test movie within 180s"
+    fail "library scan did not produce the ${#MOVIES[@]} test movies within 180s"
 }
 
 check_data() {
@@ -119,6 +145,23 @@ check_data() {
     streams="$(psql_q 'SELECT count(*) FROM "MediaStreamInfos"')"
     [[ "$streams" -ge 1 ]] || fail "no media streams stored in PostgreSQL (ffprobe data was not saved)"
     echo "movies: $movies | media streams in PostgreSQL: $streams"
+}
+
+check_sqlite_compatibility() {
+    local order infinite
+    order="$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie&SortBy=PremiereDate&SortOrder=Ascending' | jq -r '[.Items[].Name] | join(",")')"
+    [[ "$order" == "$EXPECTED_PREMIERE_ORDER" ]] \
+        || fail "movies by PremiereDate: expected $EXPECTED_PREMIERE_ORDER (SQLite order), got $order"
+    infinite="$(psql_q "SELECT coalesce(sum((xpath('/row/n/text()', query_to_xml(format(
+        'SELECT count(*) AS n FROM %I WHERE %I IN (''infinity'', ''-infinity'')', table_name, column_name), false, true, '')))[1]::text::int), 0)
+        FROM information_schema.columns WHERE table_schema = 'public'
+        AND data_type IN ('timestamp with time zone', 'timestamp without time zone', 'date')")"
+    [[ "$infinite" == "0" ]] || fail "$infinite infinite timestamp values stored in PostgreSQL"
+    grep -q 'PostgreSQL connection string: .*jit=off' "$LOG_DIR/jellyfin.log" || fail "connection does not set jit=off"
+    if docker exec "$JF" grep -qi 'password' "$DATABASE_XML"; then
+        fail "$DATABASE_XML contains the database password"
+    fi
+    echo "PremiereDate order: $order | infinite timestamps: $infinite | jit=off | no password in $DATABASE_XML"
 }
 
 check_logs() {
@@ -143,13 +186,17 @@ docker exec "$PG" pg_isready -h 127.0.0.1 -U jellyfin -d jellyfin >/dev/null || 
 psql_q 'SELECT version()'
 endstep
 
-step "Creating a test video with jellyfin-ffmpeg"
-docker run --rm --entrypoint /usr/lib/jellyfin-ffmpeg/ffmpeg -v "$NAME-media:/media" "$IMAGE" \
-    -hide_banner -loglevel error -f lavfi -i testsrc=duration=3:size=320x240:rate=10 \
-    -f lavfi -i sine=duration=3 -c:v libx264 -c:a aac -shortest \
-    -metadata title="$MOVIE" "/media/$MOVIE.mkv"
-docker run --rm --entrypoint sh -v "$NAME-media:/media" "$IMAGE" -c \
-    "mkdir -p '/media/movies/$MOVIE' && mv '/media/$MOVIE.mkv' '/media/movies/$MOVIE/'"
+step "Creating test videos with jellyfin-ffmpeg"
+for movie in "${MOVIES[@]}"; do
+    docker run --rm --entrypoint /usr/lib/jellyfin-ffmpeg/ffmpeg -v "$NAME-media:/media" "$IMAGE" \
+        -hide_banner -loglevel error -f lavfi -i testsrc=duration=3:size=320x240:rate=10 \
+        -f lavfi -i sine=duration=3 -c:v libx264 -c:a aac -shortest "/media/$movie.mkv"
+    docker run --rm --entrypoint sh -v "$NAME-media:/media" "$IMAGE" -c \
+        "mkdir -p '/media/movies/$movie' && mv '/media/$movie.mkv' '/media/movies/$movie/'"
+done
+if [[ "$LAYOUT" == "linuxserver" ]]; then
+    docker run --rm --entrypoint chown -v "$NAME-config:/config" -v "$NAME-media:/media" "$IMAGE" -R 3000:3000 /config /media
+fi
 endstep
 
 TOKEN=""
@@ -162,6 +209,12 @@ if [[ -n "${UPGRADE_FROM:-}" ]]; then
     check_data
     docker stop -t 30 "$JF" >/dev/null
     docker logs "$JF" >"$LOG_DIR/jellyfin-previous.log" 2>&1 || true
+    # Older images stored DateTime.MinValue as -infinity, which the current plugin can no longer read until the
+    # Jellyfin12.1_DateTimeInfinity migration converts it. Plant one where the next login reads it.
+    if [[ "$(psql_q "SELECT count(*) FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" LIKE '%DateTimeInfinity'")" == "0" ]]; then
+        psql_q "UPDATE \"Users\" SET \"LastActivityDate\" = '-infinity'" >/dev/null
+        echo "planted -infinity in Users.LastActivityDate"
+    fi
     endstep
 
     step "Upgrading to $IMAGE"
@@ -187,17 +240,18 @@ fi
 docker exec "$JF" sh -c 'pg_dump --version && psql --version'
 check_data
 check_logs
+check_sqlite_compatibility
 endstep
 
 # Mirrors PgSqlDatabaseProvider.MigrationBackupFast / RestoreBackupFast; keep the arguments in sync.
 step "Backup and restore with the bundled pg_dump/psql"
 docker exec -e PGPASSWORD=jellyfin "$JF" pg_dump --host="$PG" --port=5432 --username=jellyfin --dbname=jellyfin \
-    --file=/config/smoke-backup.sql --no-password --clean --if-exists
+    --file=/tmp/smoke-backup.sql --no-password --clean --if-exists
 psql_q 'CREATE TABLE smoke_marker (id int)'
 docker exec -e PGPASSWORD=jellyfin -e PGOPTIONS="-c client_min_messages=warning" "$JF" psql --host="$PG" --port=5432 --username=jellyfin --dbname=jellyfin \
     --no-password --quiet --set=ON_ERROR_STOP=1 --single-transaction \
     --command="DROP SCHEMA public CASCADE; CREATE SCHEMA public AUTHORIZATION pg_database_owner; GRANT USAGE ON SCHEMA public TO PUBLIC;" \
-    --file=/config/smoke-backup.sql >/dev/null
+    --file=/tmp/smoke-backup.sql >/dev/null
 [[ "$(psql_q "SELECT count(*) FROM pg_tables WHERE tablename = 'smoke_marker'")" == "0" ]] \
     || fail "restore did not replace the schema"
 endstep
@@ -210,4 +264,4 @@ check_data
 check_logs
 endstep
 
-echo "SMOKE TEST PASSED ($IMAGE${UPGRADE_FROM:+, upgraded from $UPGRADE_FROM}, $PG_IMAGE)"
+echo "SMOKE TEST PASSED ($IMAGE${UPGRADE_FROM:+, upgraded from $UPGRADE_FROM}, $PG_IMAGE, $LAYOUT layout)"
