@@ -1,0 +1,59 @@
+name: 'Release Notes'
+
+# Creates (or rewrites) the git tag and GitHub release for an image build that is already published, e.g. builds
+# made before release notes existed. New builds get theirs from the Docker workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Published image tag, e.g. 12.1-2'
+        required: true
+      ref:
+        description: 'Commit the image was built from'
+        required: true
+      previous:
+        description: 'Ref to compare with (default: the newest earlier build tag)'
+        required: false
+        default: ''
+      latest:
+        description: 'Mark as the latest release'
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
+          TAG: ${{ inputs.tag }}
+          REF: ${{ inputs.ref }}
+          PREVIOUS: ${{ inputs.previous }}
+          LATEST: ${{ inputs.latest }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${OWNER,,}/jellyfin.pgsql"
+          sha="$(git rev-parse --verify "${REF}^{commit}")"
+          # The multi-arch digest is the SHA-256 of the image index as stored in the registry.
+          digest="sha256:$(skopeo inspect --raw --creds "${ACTOR}:${GH_TOKEN}" "docker://${image}:${TAG}" | sha256sum | cut -d' ' -f1)"
+          .github/scripts/release_notes.sh "$TAG" "$sha" "$image" "$digest" "$PREVIOUS" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest="$LATEST"
+          else
+            gh release create "$TAG" --target "$sha" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest="$LATEST"
+          fi

@@ -1,7 +1,8 @@
 name: 'Build & Publish Docker Image'
 
 # Publishes ghcr.io/<owner>/jellyfin.pgsql:<jellyfin version>-<n> plus the moving tags <jellyfin version> and latest:
-# automatically after Verify passes on master when the image changed, on releases, and on demand.
+# automatically after Verify passes on master when the image changed, and on demand. Each published build also gets a
+# git tag and a GitHub release whose notes list the changes and any new database migration.
 on:
   workflow_run:
     workflows:
@@ -10,9 +11,6 @@ on:
       - completed
     branches:
       - master
-  release:
-    types:
-      - released
   workflow_dispatch:
   pull_request:
     branches:
@@ -71,7 +69,7 @@ jobs:
     if: needs.changes.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       packages: write
     env:
       PUSH: ${{ github.event_name != 'pull_request' }}
@@ -82,6 +80,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Determine image name and version
@@ -155,6 +154,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -168,3 +168,18 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Tag the build and publish its release notes
+        if: env.PUSH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.image_tag }}
+          IMAGE: ${{ steps.version.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          LATEST: ${{ github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master' }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          .github/scripts/release_notes.sh "$TAG" "$sha" "$IMAGE" "$DIGEST" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+          gh release create "$TAG" --target "$sha" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest="$LATEST"

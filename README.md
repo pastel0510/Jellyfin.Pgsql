@@ -24,9 +24,10 @@ This plugin adds postgres SQL support to [Jellyfin Server](https://github.com/je
 
 You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/pastel0510/jellyfin.pgsql:12.1`.
 
-Images are published automatically whenever a change to the plugin or the image is merged. The tag named after the
-Jellyfin version (for example `12.1`) and `latest` always point to the newest build; each build also gets a fixed tag
-`<version>-<n>` (for example `12.1-2`) to pin an exact build.
+Images are published automatically whenever a change to the plugin or the image is merged. Each build gets a fixed tag
+`<version>-<n>` (for example `12.1-2`) and a [release](https://github.com/pastel0510/Jellyfin.Pgsql/releases) whose notes
+list its changes and any new database migration. The tag named after the Jellyfin version (for example `12.1`) and
+`latest` always point to the newest build.
 
 You need to add the connection parameters as environment variables in your compose file:
 
@@ -53,6 +54,29 @@ services:
 
 The password is only read from the environment. On every start the entrypoint records the other connection settings in
 `database.xml`; the password is never written to disk.
+
+### Upgrading and pinning
+
+`:12.1` is fine for trying the image. For a server you rely on, pin the exact build and its digest as given in the
+release notes, for example `ghcr.io/pastel0510/jellyfin.pgsql:12.1-2@sha256:...`: with a moving tag, a restart can
+silently pull a build that adds a database migration. Migrations run on the first start of the new image and cannot
+be undone by going back to an older image, so before moving to a new build read its release notes and take a
+`pg_dump` of the database (the plugin also takes one automatically before migrating).
+
+Renovate's default Docker versioning reads the `-<n>` of these tags as a compatibility suffix and never offers a newer
+build. Add a package rule:
+
+```json
+{
+  "packageRules": [
+    {
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/pastel0510/jellyfin.pgsql"],
+      "versioning": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)-(?<patch>\\d+)$"
+    }
+  ]
+}
+```
 
 ### Configuration paths and running as a non-root user
 
@@ -106,6 +130,10 @@ Jellyfin's queries were written for SQLite. The plugin adjusts PostgreSQL so res
   converted by a database migration on the first start.
 
 Expected differences that are not bugs:
+
+- Some list queries remain slower than on SQLite. On a library of 84,000 items, "continue watching"
+  (`/UserItems/Resume`) and next up take 0.2-0.8 s on PostgreSQL against 0.07-0.11 s on SQLite. This is the cost of
+  Jellyfin's query shapes on PostgreSQL, not the JIT problem above (which made them take about a minute).
 
 - PostgreSQL stores timestamps with microsecond precision, .NET and SQLite with 100 ns ticks, so values lose their
   last digit. Image tags are derived from such timestamps, so after migrating from SQLite every image tag changes once
@@ -172,11 +200,19 @@ Launch your Jellyfin server.
 # Add migration
 Run `dotnet ef migrations add {MIGRATION_NAME} --project "/workspaces/Jellyfin.Pgsql/Jellyfin.Plugin.Pgsql" -- --migration-provider Jellyfin-PgSql`
 
-# Release flow
+# Releases
 
-To create a new release, first sync all Jellyfin server changes then create a new migration as seen above. After that create a new efbundle:
-`dotnet ef migrations bundle -o docker/jellyfin.PgsqlMigrator.dll -r linux-x64 --self-contained --project "/workspaces/Jellyfin.Pgsql/Jellyfin.Plugin.Pgsql" --  --migration-provider Jellyfin-PgSql`
-Then build the container.
+Images are built and published by the [Build & Publish Docker Image](.github/workflows/docker.yaml) workflow:
+
+1. Changes go through a pull request; the Verify workflow (build, migration check, smoke and migration tests) must pass.
+2. After the merge, Verify runs again on `master`. If it passes and the merge changed the plugin or the Docker files,
+   the image is built for linux/amd64 and linux/arm64 and pushed as `<version>-<n>`, `<version>` and `latest`.
+3. The build is tagged in git and gets a GitHub release with the image digest, the changes since the previous build
+   and any new database migration.
+
+New Jellyfin versions arrive through the [automated update](#automated-jellyfin-updates) pull request. A database
+migration is added when the Jellyfin data model changes (see [Add migration](#add-migration)).
+[Release Notes](.github/workflows/release-notes.yaml) can (re)create the release of an already published build.
 
 # Migrating from SQLite
 
