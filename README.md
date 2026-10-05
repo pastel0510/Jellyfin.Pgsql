@@ -90,6 +90,9 @@ the fix (uses more of your Claude usage). Neither commits anything.
 Pull requests opened by the workflow don't trigger other workflows; they were already verified in the same run.
 After merging, publish the image with a release or by running the Docker workflow.
 
+Every push and pull request is also scanned for committed secrets (API keys, tokens, passwords) by the
+[Secret Scan](.github/workflows/secret-scan.yaml) workflow, which runs Gitleaks over the full git history.
+
 Run the same checks locally with `scripts/verify.sh` (`SKIP_DOCKER=1` for build and migration checks only).
 
 # Build
