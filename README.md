@@ -1,5 +1,12 @@
 # The Unofficial Postgre SQL adapter for Jellyfin Server
 
+> [!WARNING]
+> **This is an LLM-made and LLM-maintained fork** of [JPVenson/Jellyfin.Pgsql](https://github.com/JPVenson/Jellyfin.Pgsql).
+> The changes in this fork, including the updates to new Jellyfin versions, are written by an AI model (Claude) and updated
+> automatically by the [Jellyfin Update workflow](#automated-jellyfin-updates). They are checked by automated builds and
+> smoke tests, not necessarily reviewed line by line by a human. It is not affiliated with or endorsed by the original
+> author or the Jellyfin project. Report problems with this fork here, not upstream.
+
 This plugin adds postgres SQL support to [Jellyfin Server](https://github.com/jellyfin/jellyfin).
 
 
