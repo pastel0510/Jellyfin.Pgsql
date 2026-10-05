@@ -2,6 +2,10 @@ name: 'Release Notes'
 
 # Creates (or rewrites) the git tag and GitHub release for an image build that is already published, e.g. builds
 # made before release notes existed. New builds get theirs from the Docker workflow.
+#
+# GitHub only lets the workflow token create a tag on a commit that is currently the tip of a branch or tag
+# (otherwise: "Resource not accessible by integration"). The Docker workflow tags the commit just merged to master,
+# so this only matters for older builds: point a branch at the commit first, run this workflow, then move it back.
 on:
   workflow_dispatch:
     inputs:
