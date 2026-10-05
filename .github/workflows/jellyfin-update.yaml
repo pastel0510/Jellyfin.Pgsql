@@ -107,10 +107,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 .github/scripts/update_jellyfin.py apply "$TAG" 2>&1 | tee "$LOG_DIR/bump.log"
 
-      - name: Set up .NET (SDK from the Jellyfin release)
+      # Jellyfin's global.json pins e.g. "10.0.0" with rollForward, which setup-dotnet rejects as a
+      # global-json-file; install the latest SDK of that major instead.
+      - name: Read the .NET SDK version of the Jellyfin release
+        id: sdk
+        run: echo "version=$(jq -r '.sdk.version' jellyfin/global.json | cut -d. -f1).0.x" >> "$GITHUB_OUTPUT"
+
+      - name: Set up .NET ${{ steps.sdk.outputs.version }}
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          global-json-file: jellyfin/global.json
+          dotnet-version: ${{ steps.sdk.outputs.version }}
 
       - name: Prepare the smoke test
         env:
@@ -317,6 +323,7 @@ jobs:
           name: jellyfin-update-logs
           path: ${{ env.LOG_DIR }}
           if-no-files-found: ignore
+          include-hidden-files: true
 
       - name: Fail the run if verification failed
         if: steps.result.outputs.passed != 'true'

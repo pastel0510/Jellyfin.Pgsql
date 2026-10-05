@@ -56,3 +56,4 @@ jobs:
           name: smoke-logs
           path: ${{ env.LOG_DIR }}
           if-no-files-found: ignore
+          include-hidden-files: true
