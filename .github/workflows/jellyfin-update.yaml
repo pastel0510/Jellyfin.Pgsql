@@ -1,4 +1,4 @@
-name: '🔄 Jellyfin Update'
+name: 'Jellyfin Update'
 
 # Daily: if a newer stable Jellyfin release (with its Docker image and NuGet packages) is out, bump the
 # repo to it, add a PostgreSQL migration when the data model changed, and run the full verification

@@ -78,12 +78,12 @@ a specific tag). When a newer stable Jellyfin release has its Docker image and N
 5. opens a pull request `automation/jellyfin-<version>` (a draft if verification still fails).
 
 One-time setup:
-- Actions → enable workflows (forks start with them disabled).
-- Settings → Actions → General → Workflow permissions → allow GitHub Actions to create and approve pull requests.
-- Settings → Secrets and variables → Actions → add `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or
+- Actions > enable workflows (forks start with them disabled).
+- Settings > Actions > General > Workflow permissions > allow GitHub Actions to create and approve pull requests.
+- Settings > Secrets and variables > Actions > add `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or
   `ANTHROPIC_API_KEY`. Without it the workflow still bumps and verifies, but cannot fix failures.
 
-To check the Claude step works, run **🤖 Claude Check** from the Actions tab: `quick` makes one short Claude call with the same
+To check the Claude step works, run **Claude Check** from the Actions tab: `quick` makes one short Claude call with the same
 credential, model and permissions; `drill` breaks the build on purpose in that run, lets Claude find and fix it, and verifies
 the fix (uses more of your Claude usage). Neither commits anything.
 

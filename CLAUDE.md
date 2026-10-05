@@ -21,3 +21,5 @@ built on `jellyfin/jellyfin`.
   Never edit migrations that were already released.
 - Raw SQL in upstream SQLite migrations is not carried over by EF; port data fixes to PostgreSQL syntax by hand.
 - The pg_dump/psql arguments in `scripts/smoke-test.sh` mirror `PgSqlDatabaseProvider`; keep them in sync.
+- No emoji anywhere in the repository (code, docs, workflow names, commit messages, PR texts); keep the tone plain and
+  professional. `scripts/verify.sh` fails on emoji.

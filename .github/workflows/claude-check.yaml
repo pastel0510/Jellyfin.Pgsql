@@ -1,4 +1,4 @@
-name: '🤖 Claude Check'
+name: 'Claude Check'
 
 # Manual check that the Claude Code step of the Jellyfin Update workflow works, with the same
 # credentials, model and tool permissions (keep claude_args in sync with jellyfin-update.yaml).
