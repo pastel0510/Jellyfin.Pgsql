@@ -14,6 +14,12 @@ export IMAGE="${IMAGE:-jellyfin-pgsql:verify}"
 DOCKERFILE="${DOCKERFILE:-docker/Dockerfile}"
 PROJECT=Jellyfin.Plugin.Pgsql
 
+echo "==> Checking for emoji (not used in this repository)"
+if git ls-files -z -- . ':!:jellyfin' | LC_ALL=C.UTF-8 xargs -0 grep -nIP '[\x{1F000}-\x{1FAFF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{FE0F}]'; then
+    echo "Emoji found in the files above; use plain text instead." >&2
+    exit 1
+fi
+
 echo "==> Building the plugin (Release, warnings as errors)"
 dotnet tool restore
 dotnet build Jellyfin.Plugin.Pgsql.sln -c Release
