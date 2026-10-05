@@ -323,6 +323,7 @@ jobs:
           name: jellyfin-update-logs
           path: ${{ env.LOG_DIR }}
           if-no-files-found: ignore
+          include-hidden-files: true
 
       - name: Fail the run if verification failed
         if: steps.result.outputs.passed != 'true'
