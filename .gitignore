@@ -6,3 +6,7 @@ artifacts
 
 .devcontainer/pgsql/
 docker/jellyfin.PgsqlMigrator.dll
+
+# CI / smoke test logs
+.ci-logs/
+smoke-logs/

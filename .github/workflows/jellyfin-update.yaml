@@ -1,0 +1,325 @@
+name: '🔄 Jellyfin Update'
+
+# Daily: if a newer stable Jellyfin release (with its Docker image and NuGet packages) is out, bump the
+# repo to it, add a PostgreSQL migration when the data model changed, and run the full verification
+# (build, migration check, Docker smoke test incl. upgrade from the newest published image). If anything
+# fails, or upstream added migrations with raw SQL that may need a PostgreSQL port, Claude Code fixes
+# and reviews it, the verification runs again, and a pull request is opened (as a draft if still red).
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Jellyfin release tag to update to (e.g. v12.2). Empty = latest stable release.'
+        required: false
+        default: ''
+      force:
+        description: 'Run even if the repo already targets this version or the update branch exists'
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: jellyfin-update
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+      current: ${{ steps.check.outputs.current }}
+      branch: ${{ steps.check.outputs.branch }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check for a new Jellyfin release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          S=.github/scripts/update_jellyfin.py
+          TAG="${INPUT_TAG:-$(python3 "$S" latest)}"
+          VERSION="${TAG#v}"
+          CURRENT="$(python3 "$S" current)"
+          BRANCH="automation/jellyfin-${VERSION}"
+          RUN=true
+          if [[ "$FORCE" != "true" ]]; then
+            if [[ "$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -1)" == "$CURRENT" ]]; then
+              echo "::notice::Already on Jellyfin ${CURRENT} (latest release: ${VERSION})"
+              RUN=false
+            elif git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+              echo "::notice::Branch ${BRANCH} already exists; delete it or use 'force' to redo the update"
+              RUN=false
+            fi
+          fi
+          if [[ "$RUN" == "true" ]] && ! python3 "$S" ready "$TAG"; then
+            echo "::notice::Jellyfin ${VERSION} is released but its Docker image or NuGet packages are not published yet"
+            RUN=false
+          fi
+          {
+            echo "run=$RUN"; echo "tag=$TAG"; echo "version=$VERSION"; echo "current=$CURRENT"; echo "branch=$BRANCH"
+          } >> "$GITHUB_OUTPUT"
+          echo "Jellyfin ${CURRENT} -> ${VERSION}: run=${RUN}"
+
+  update:
+    needs: check
+    if: needs.check.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: write
+      pull-requests: write
+      packages: read
+      actions: read
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      VERSION: ${{ needs.check.outputs.version }}
+      CURRENT: ${{ needs.check.outputs.current }}
+      BRANCH: ${{ needs.check.outputs.branch }}
+      LOG_DIR: ${{ github.workspace }}/.ci-logs
+      HAS_CLAUDE_AUTH: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Create the update branch
+        run: |
+          mkdir -p "$LOG_DIR"
+          git switch -C "$BRANCH"
+
+      - name: Bump versions to Jellyfin ${{ needs.check.outputs.version }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/update_jellyfin.py apply "$TAG" 2>&1 | tee "$LOG_DIR/bump.log"
+
+      - name: Set up .NET (SDK from the Jellyfin release)
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: jellyfin/global.json
+
+      - name: Prepare the smoke test
+        env:
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          .github/scripts/previous_image.sh "ghcr.io/${OWNER,,}/jellyfin.pgsql" >> "$GITHUB_ENV"
+          # Jellyfin reports three-part versions (12.2 -> 12.2.0).
+          expect="$VERSION"; [[ "$expect" =~ ^[0-9]+\.[0-9]+$ ]] && expect="$expect.0"
+          echo "EXPECT_VERSION=$expect" >> "$GITHUB_ENV"
+
+      - name: Add a PostgreSQL migration if the data model changed
+        id: migration
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            dotnet tool restore
+            dotnet build Jellyfin.Plugin.Pgsql -c Debug
+            if dotnet ef migrations has-pending-model-changes --project Jellyfin.Plugin.Pgsql --no-build -- --migration-provider Jellyfin-PgSql; then
+              echo "No data model changes."
+            else
+              dotnet ef migrations add "Jellyfin${VERSION}" --project Jellyfin.Plugin.Pgsql -- --migration-provider Jellyfin-PgSql
+            fi
+          } 2>&1 | tee "$LOG_DIR/migration.log"
+
+      - name: List upstream migrations that may need a PostgreSQL port
+        id: upstream
+        run: |
+          set -euo pipefail
+          git -C jellyfin fetch --quiet --depth 1 origin tag "v${CURRENT}" || { echo "review=false" >> "$GITHUB_OUTPUT"; exit 0; }
+          report="$LOG_DIR/upstream-migrations.md"
+          {
+            echo "## Upstream changes between v${CURRENT} and ${TAG}"
+            echo "### New SQLite EF Core migrations"
+            git -C jellyfin diff --name-only --diff-filter=A "v${CURRENT}" "$TAG" -- src/Jellyfin.Database/Jellyfin.Database.Providers.Sqlite/Migrations | grep -v Designer || echo "(none)"
+            echo "### New or changed startup migration routines"
+            git -C jellyfin diff --name-only "v${CURRENT}" "$TAG" -- Jellyfin.Server/Migrations || echo "(none)"
+          } > "$report"
+          raw_sql="$(git -C jellyfin diff "v${CURRENT}" "$TAG" -- src/Jellyfin.Database/Jellyfin.Database.Providers.Sqlite/Migrations Jellyfin.Server/Migrations | grep -E '^\+.*(migrationBuilder\.Sql\(|ExecuteSqlRaw|ExecuteSql\(|SqlQueryRaw|FromSqlRaw)' || true)"
+          if [[ -n "$raw_sql" ]]; then
+            { echo "### Raw SQL added upstream"; echo '```'; echo "$raw_sql"; echo '```'; } >> "$report"
+            echo "review=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "review=false" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$report"
+
+      - name: Verify
+        id: verify
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          scripts/verify.sh 2>&1 | tee "$LOG_DIR/verify-1.log"
+
+      - name: Fix and review with Claude
+        id: claude
+        if: >-
+          env.HAS_CLAUDE_AUTH == 'true' && (
+          steps.migration.outcome == 'failure' ||
+          steps.verify.outcome == 'failure' ||
+          steps.upstream.outputs.review == 'true')
+        continue-on-error: true
+        timeout-minutes: 75
+        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1.0.241
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are maintaining Jellyfin.Pgsql, a PostgreSQL database provider plugin (EF Core / Npgsql) for the
+            Jellyfin media server, plus a Docker image that bundles it. An automated job just bumped this
+            repository from Jellyfin ${{ env.CURRENT }} to ${{ env.VERSION }} (tag ${{ env.TAG }}) with
+            .github/scripts/update_jellyfin.py. The jellyfin/ submodule is checked out at ${{ env.TAG }} as the
+            upstream source reference.
+
+            Results so far (logs are in ${{ env.LOG_DIR }}):
+            - Migration step (migration.log): ${{ steps.migration.outcome }}
+            - Verification, scripts/verify.sh (verify-1.log): ${{ steps.verify.outcome }}
+            - Upstream migration report (upstream-migrations.md), raw SQL added upstream: ${{ steps.upstream.outputs.review }}
+
+            Your job:
+            1. If anything failed, find the root cause and fix it. Typical causes: Jellyfin API changes the
+               plugin code must follow (compare with jellyfin/ sources, e.g. the SQLite provider in
+               jellyfin/src/Jellyfin.Database/Jellyfin.Database.Providers.Sqlite), package version conflicts,
+               a missing or broken PostgreSQL migration, Dockerfile changes for a new base image.
+            2. Review every upstream migration listed in upstream-migrations.md. EF Core regenerates schema
+               changes for PostgreSQL, but raw SQL (migrationBuilder.Sql, ExecuteSqlRaw, ...) and data fixes in
+               upstream SQLite migrations are not carried over. Port the ones that change data or schema into
+               the PostgreSQL migration for this version in Jellyfin.Plugin.Pgsql/Migrations, translated to
+               PostgreSQL syntax (quoted identifiers, uuid/boolean types). Startup migration routines in
+               jellyfin/Jellyfin.Server/Migrations that use SQLite-only SQL must be called out in your summary.
+            3. Run scripts/verify.sh and iterate until it prints VERIFY PASSED. It builds with warnings as
+               errors, checks migrations match the model, builds the Docker image and runs
+               scripts/smoke-test.sh (PostgreSQL 18, wizard, login, library scan, upgrade from
+               ${{ env.UPGRADE_FROM || 'no previous image' }}, backup and restore). Use
+               `dotnet build Jellyfin.Plugin.Pgsql.sln -c Release` for quicker iterations first.
+
+            Rules:
+            - Keep changes minimal and in the style of the surrounding code. Never weaken, skip or delete checks
+              in scripts/verify.sh or scripts/smoke-test.sh, and never edit existing, already released
+              migrations except the one generated for ${{ env.VERSION }}.
+            - To add a migration: dotnet ef migrations add Jellyfin${{ env.VERSION }} --project Jellyfin.Plugin.Pgsql -- --migration-provider Jellyfin-PgSql
+              (remove an incomplete one first with dotnet ef migrations remove --project Jellyfin.Plugin.Pgsql -- --migration-provider Jellyfin-PgSql).
+            - Do not commit, push, or open pull requests; the workflow does that after re-verifying.
+            - When done, write a short Markdown summary for the pull request to ${{ env.LOG_DIR }}/claude-summary.md:
+              what failed, what you changed and why, which upstream migrations you ported or judged
+              unnecessary, and anything a human must still check. Be honest if verification still fails.
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 120
+            --allowedTools "Read,Edit,MultiEdit,Write,Glob,Grep,LS,TodoWrite,Bash(dotnet:*),Bash(docker:*),Bash(scripts/verify.sh),Bash(scripts/verify.sh:*),Bash(scripts/smoke-test.sh),Bash(scripts/smoke-test.sh:*),Bash(git diff:*),Bash(git status:*),Bash(git log:*),Bash(git show:*),Bash(git -C jellyfin:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(find:*),Bash(wc:*),Bash(sed -n:*),Bash(diff:*),Bash(python3 .github/scripts/update_jellyfin.py:*)"
+            --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*)"
+
+      - name: Verify again after Claude
+        id: verify2
+        if: steps.claude.outcome == 'success' || steps.claude.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          scripts/verify.sh 2>&1 | tee "$LOG_DIR/verify-2.log"
+
+      - name: Summarise the result
+        id: result
+        env:
+          MIGRATION: ${{ steps.migration.outcome }}
+          VERIFY1: ${{ steps.verify.outcome }}
+          VERIFY2: ${{ steps.verify2.outcome }}
+          CLAUDE: ${{ steps.claude.outcome }}
+          REVIEW: ${{ steps.upstream.outputs.review }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ "$VERIFY2" == "success" ]] || [[ "$VERIFY2" == "skipped" && "$VERIFY1" == "success" && "$MIGRATION" == "success" ]]; then
+            passed=true
+          else
+            passed=false
+          fi
+          echo "passed=$passed" >> "$GITHUB_OUTPUT"
+          body="$LOG_DIR/pr-body.md"
+          {
+            echo "Automated update from Jellyfin ${CURRENT} to [${VERSION}](https://github.com/jellyfin/jellyfin/releases/tag/${TAG})."
+            echo
+            if [[ "$passed" == "true" ]]; then
+              echo "**Verification passed**: Release build, migration check, and Docker smoke test on PostgreSQL 18${UPGRADE_FROM:+ (including upgrade from \`${UPGRADE_FROM}\`)}, with backup and restore."
+            else
+              echo "> [!WARNING]"
+              echo "> **Verification is still failing.** This PR needs a human; see the logs in the [workflow run](${RUN_URL})."
+            fi
+            echo
+            echo "| Step | Outcome |"
+            echo "|---|---|"
+            echo "| Version bump + migration | ${MIGRATION} |"
+            echo "| Verification | ${VERIFY1} |"
+            echo "| Claude fix/review | ${CLAUDE:-skipped} |"
+            echo "| Verification after Claude | ${VERIFY2:-skipped} |"
+            echo
+            if [[ "$REVIEW" == "true" && "$CLAUDE" == "skipped" ]]; then
+              echo "> [!IMPORTANT]"
+              echo "> Upstream added raw SQL migrations that may need porting to PostgreSQL, and no Claude credentials are configured to review them. Check them by hand."
+              echo
+            fi
+            if [[ -f "$LOG_DIR/claude-summary.md" ]]; then
+              echo "## Claude's summary"
+              cat "$LOG_DIR/claude-summary.md"
+              echo
+            fi
+            cat "$LOG_DIR/upstream-migrations.md" 2>/dev/null || true
+            echo
+            echo "Workflow run: ${RUN_URL}"
+          } > "$body"
+          cat "$body" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit, push and open the pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PASSED: ${{ steps.result.outputs.passed }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::notice::Nothing changed; no pull request needed"
+            exit 0
+          fi
+          git commit -m "Update to Jellyfin ${VERSION}" -m "Automated by the Jellyfin Update workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          git push --force-with-lease -u origin "$BRANCH"
+          title="Update to Jellyfin ${VERSION}"
+          [[ "$PASSED" == "true" ]] || title="${title} (verification failing)"
+          draft=(); [[ "$PASSED" == "true" ]] || draft=(--draft)
+          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+            gh pr edit "$BRANCH" --title "$title" --body-file "$LOG_DIR/pr-body.md"
+          else
+            base="$(gh repo view "$GITHUB_REPOSITORY" --json defaultBranchRef --jq .defaultBranchRef.name)"
+            gh pr create --base "$base" --head "$BRANCH" \
+              --title "$title" --body-file "$LOG_DIR/pr-body.md" "${draft[@]}"
+          fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: jellyfin-update-logs
+          path: ${{ env.LOG_DIR }}
+          if-no-files-found: ignore
+
+      - name: Fail the run if verification failed
+        if: steps.result.outputs.passed != 'true'
+        run: |
+          echo "::error::Verification failed for Jellyfin ${VERSION}; a draft PR was opened for a human to finish."
+          exit 1

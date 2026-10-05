@@ -55,6 +55,32 @@ Backups contain the `\restrict` lines added by pg_dump 18, so restore them by ha
 
 Configuration comes from the `ConnectionString` in `database.xml`, and any `POSTGRES_*` environment variables override it.
 
+## Automated Jellyfin updates
+
+[`jellyfin-update.yaml`](.github/workflows/jellyfin-update.yaml) runs daily (or by hand from the Actions tab, optionally with
+a specific tag). When a newer stable Jellyfin release has its Docker image and NuGet packages published, it:
+
+1. bumps every version in the repo with [`update_jellyfin.py`](.github/scripts/update_jellyfin.py) (Jellyfin packages, base
+   image, targetAbi, EF Core / Microsoft.Extensions versions to match the server, .NET SDK, submodule, docs);
+2. adds a PostgreSQL migration if the data model changed;
+3. runs [`scripts/verify.sh`](scripts/verify.sh): Release build, migration check, Docker build and
+   [`scripts/smoke-test.sh`](scripts/smoke-test.sh) against PostgreSQL 18 (startup wizard, login, library scan with a real
+   video, upgrade from the newest published image, backup and restore);
+4. if anything fails, or upstream added raw SQL migrations that may need a PostgreSQL port, Claude Code fixes or reviews it
+   and the verification runs again;
+5. opens a pull request `automation/jellyfin-<version>` (a draft if verification still fails).
+
+One-time setup:
+- Actions → enable workflows (forks start with them disabled).
+- Settings → Actions → General → Workflow permissions → allow GitHub Actions to create and approve pull requests.
+- Settings → Secrets and variables → Actions → add `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or
+  `ANTHROPIC_API_KEY`. Without it the workflow still bumps and verifies, but cannot fix failures.
+
+Pull requests opened by the workflow don't trigger other workflows; they were already verified in the same run.
+After merging, publish the image with a release or by running the Docker workflow.
+
+Run the same checks locally with `scripts/verify.sh` (`SKIP_DOCKER=1` for build and migration checks only).
+
 # Build
 
 Checkout the Jellyfin submodule.
