@@ -1,6 +1,15 @@
 name: 'Build & Publish Docker Image'
 
+# Publishes ghcr.io/<owner>/jellyfin.pgsql:<jellyfin version>-<n> plus the moving tags <jellyfin version> and latest:
+# automatically after Verify passes on master when the image changed, on releases, and on demand.
 on:
+  workflow_run:
+    workflows:
+      - Verify
+    types:
+      - completed
+    branches:
+      - master
   release:
     types:
       - released
@@ -21,7 +30,45 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.changes.outputs.publish }}
+    steps:
+      - name: Checkout repository
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Decide whether to build
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          VERIFY_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          VERIFY_EVENT: ${{ github.event.workflow_run.event }}
+        run: |
+          set -euo pipefail
+          publish=true
+          if [[ "$EVENT" == "workflow_run" ]]; then
+            # Only a successful Verify of a push to master, and only when the commit changed what goes into the image.
+            if [[ "$VERIFY_CONCLUSION" != "success" || "$VERIFY_EVENT" != "push" ]]; then
+              echo "::notice::Verify was $VERIFY_CONCLUSION for a $VERIFY_EVENT event; not publishing"
+              publish=false
+            elif ! git diff --name-only HEAD^1 HEAD | grep -qE '^(Jellyfin\.Plugin\.Pgsql/|docker/|Jellyfin\.Plugin\.Pgsql\.sln$|build\.yaml$|jellyfin\.ruleset$)'; then
+              echo "::notice::No change to the plugin or Docker files in $(git rev-parse --short HEAD); not publishing"
+              publish=false
+            fi
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
   build-and-push:
+    needs: changes
+    if: needs.changes.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -34,6 +81,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
       - name: Determine image name and version
@@ -69,8 +117,11 @@ jobs:
           MAX_ROLLING=$(grep -oP "^${ESCAPED_VERSION}-\K[0-9]+$" <<<"$EXISTING_TAGS" | sort -n | tail -1 || true)
 
           IMAGE_TAG="${JELLYFIN_VERSION}-$(( ${MAX_ROLLING:-0} + 1 ))"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "image=$IMAGE"
+            echo "jellyfin_version=$JELLYFIN_VERSION"
+            echo "image_tag=$IMAGE_TAG"
+          } >> "$GITHUB_OUTPUT"
           echo "Computed image: ${IMAGE}:${IMAGE_TAG}"
 
       - name: Docker metadata
@@ -81,7 +132,8 @@ jobs:
           flavor: latest=false
           tags: |
             type=raw,value=${{ steps.version.outputs.image_tag }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=${{ steps.version.outputs.jellyfin_version }},enable=${{ env.PUSH == 'true' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master') }}
+            type=raw,value=latest,enable=${{ env.PUSH == 'true' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master') }}
           labels: |
             org.opencontainers.image.title=Jellyfin PostgreSQL
             org.opencontainers.image.description=Jellyfin with the experimental PostgreSQL database provider plugin

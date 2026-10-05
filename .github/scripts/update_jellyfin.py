@@ -182,10 +182,10 @@ def apply(tag: str) -> None:
     for path in (ROOT / ".vscode" / "tasks.json", ROOT / ".vscode" / "launch.json", ROOT / "README.md"):
         edit(path, r"(bin/[Dd]ebug/)net\d+\.\d+", rf"\g<1>{tfm}", required=False)
 
-    # Docs and examples point at the first image of the new version.
+    # Docs and examples point at the moving tag of the new version.
     escaped_old = re.escape(old)
     for path in (ROOT / "README.md", ROOT / "docker" / "docker-compose.yaml", DOCKERFILE):
-        edit(path, rf"(jellyfin\.pgsql:){escaped_old}-\d+", rf"\g<1>{version}-1", required=False)
+        edit(path, rf"(jellyfin\.pgsql:){escaped_old}(?:-\d+)?(?![\d.])", rf"\g<1>{version}", required=False)
     edit(ROOT / "README.md", rf"(built on Jellyfin ){escaped_old}\b", rf"\g<1>{version}", required=False)
     if version != old:
         edit(ROOT / "build.yaml", r"^(changelog: >\n  ).*$", rf"\g<1>Jellyfin {version} support", required=False)

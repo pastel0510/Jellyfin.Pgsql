@@ -22,14 +22,18 @@ This plugin adds postgres SQL support to [Jellyfin Server](https://github.com/je
 
 # How to use it
 
-You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/pastel0510/jellyfin.pgsql:12.1-1`.
+You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/pastel0510/jellyfin.pgsql:12.1`.
+
+Images are published automatically whenever a change to the plugin or the image is merged. The tag named after the
+Jellyfin version (for example `12.1`) and `latest` always point to the newest build; each build also gets a fixed tag
+`<version>-<n>` (for example `12.1-2`) to pin an exact build.
 
 You need to add the connection parameters as environment variables in your compose file:
 
 ```yaml
 services:
   jellyfin:
-    image: ghcr.io/pastel0510/jellyfin.pgsql:12.1-1
+    image: ghcr.io/pastel0510/jellyfin.pgsql:12.1
     volumes:
       - /path/to/config:/config
       - /path/to/cache:/cache
