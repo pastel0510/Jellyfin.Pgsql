@@ -1,0 +1,166 @@
+name: '🤖 Claude Check'
+
+# Manual check that the Claude Code step of the Jellyfin Update workflow works, with the same
+# credentials, model and tool permissions (keep claude_args in sync with jellyfin-update.yaml).
+#   quick: one short Claude call (credential, model, file and shell access). Uses very little usage.
+#   drill: breaks the build on purpose in this run's checkout, lets Claude find and fix it, then runs
+#          the full verification. Proves the whole fix loop; uses more usage (~10 minutes).
+# Nothing is committed or pushed in either mode.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'quick = short Claude call; drill = break the build on purpose and let Claude fix it'
+        type: choice
+        options:
+          - quick
+          - drill
+        default: quick
+
+permissions: {}
+
+concurrency:
+  group: claude-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    env:
+      MODE: ${{ inputs.mode }}
+      LOG_DIR: ${{ github.workspace }}/.ci-logs
+      HAS_CLAUDE_AUTH: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+    steps:
+      - name: Check Claude credentials are configured
+        run: |
+          if [[ "$HAS_CLAUDE_AUTH" != "true" ]]; then
+            echo "::error::Add the repository secret CLAUDE_CODE_OAUTH_TOKEN (from 'claude setup-token') or ANTHROPIC_API_KEY under Settings > Secrets and variables > Actions > Repository secrets."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare
+        run: mkdir -p "$LOG_DIR"
+
+      - name: Set up .NET
+        if: inputs.mode == 'drill'
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Break the build on purpose
+        if: inputs.mode == 'drill'
+        env:
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          .github/scripts/previous_image.sh "ghcr.io/${OWNER,,}/jellyfin.pgsql" >> "$GITHUB_ENV"
+          file=Jellyfin.Plugin.Pgsql/Database/PgSqlDatabaseProvider.cs
+          grep -q '^using System.Globalization;$' "$file" || { echo "::error::drill target line not found in $file"; exit 1; }
+          sed -i '/^using System.Globalization;$/d' "$file"
+          if dotnet build Jellyfin.Plugin.Pgsql -c Release >"$LOG_DIR/broken-build.log" 2>&1; then
+            echo "::error::The deliberate breakage did not break the build"; exit 1
+          fi
+          echo "Build broken as intended:"; grep -m3 'error' "$LOG_DIR/broken-build.log" || true
+
+      - name: Claude (quick check)
+        id: quick
+        if: inputs.mode == 'quick'
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1.0.241
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            This is a short connectivity check of the Claude Code step in this repository's GitHub Actions.
+            1. Read CLAUDE.md.
+            2. Run `git status --short` and `ls scripts`.
+            3. Write the file ${{ env.LOG_DIR }}/claude-check.md containing exactly two lines: first the text
+               CLAUDE CHECK OK, then one sentence describing what this repository is.
+            Do nothing else.
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 8
+            --allowedTools "Read,Edit,MultiEdit,Write,Glob,Grep,LS,TodoWrite,Bash(dotnet:*),Bash(docker:*),Bash(scripts/verify.sh),Bash(scripts/verify.sh:*),Bash(scripts/smoke-test.sh),Bash(scripts/smoke-test.sh:*),Bash(git diff:*),Bash(git status:*),Bash(git log:*),Bash(git show:*),Bash(git -C jellyfin:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(find:*),Bash(wc:*),Bash(sed -n:*),Bash(diff:*),Bash(python3 .github/scripts/update_jellyfin.py:*)"
+            --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*)"
+
+      - name: Claude (fire drill)
+        id: drill
+        if: inputs.mode == 'drill'
+        continue-on-error: true
+        timeout-minutes: 40
+        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1.0.241
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are maintaining Jellyfin.Pgsql (see CLAUDE.md). The verification of this checkout is failing.
+            Run scripts/verify.sh, find the root cause, fix it with a minimal change in the style of the
+            surrounding code, and run scripts/verify.sh again until it prints VERIFY PASSED. Never weaken or
+            skip checks in scripts/verify.sh or scripts/smoke-test.sh. Do not commit or push.
+            When done, write a short Markdown summary of the cause and your fix to ${{ env.LOG_DIR }}/claude-summary.md.
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 40
+            --allowedTools "Read,Edit,MultiEdit,Write,Glob,Grep,LS,TodoWrite,Bash(dotnet:*),Bash(docker:*),Bash(scripts/verify.sh),Bash(scripts/verify.sh:*),Bash(scripts/smoke-test.sh),Bash(scripts/smoke-test.sh:*),Bash(git diff:*),Bash(git status:*),Bash(git log:*),Bash(git show:*),Bash(git -C jellyfin:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(find:*),Bash(wc:*),Bash(sed -n:*),Bash(diff:*),Bash(python3 .github/scripts/update_jellyfin.py:*)"
+            --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*)"
+
+      - name: Verify Claude's fix independently
+        id: verify
+        if: inputs.mode == 'drill'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          scripts/verify.sh 2>&1 | tee "$LOG_DIR/verify.log"
+
+      - name: Result
+        env:
+          QUICK: ${{ steps.quick.outcome }}
+          DRILL: ${{ steps.drill.outcome }}
+          VERIFY: ${{ steps.verify.outcome }}
+        run: |
+          ok=true
+          {
+            echo "## Claude Check ($MODE)"
+            if [[ "$MODE" == "quick" ]]; then
+              echo "- Claude step: $QUICK"
+              if [[ "$QUICK" == "success" ]] && head -1 "$LOG_DIR/claude-check.md" 2>/dev/null | grep -q 'CLAUDE CHECK OK'; then
+                echo "- Claude read the repo, ran shell commands and wrote its answer:"
+                echo; sed 's/^/> /' "$LOG_DIR/claude-check.md"
+              else
+                echo "- **Failed**: Claude did not produce the expected answer. Check the credential and the step log."
+                ok=false
+              fi
+            else
+              echo "- Claude step: $DRILL"
+              echo "- Independent verification after Claude: $VERIFY"
+              echo; echo '### Net change vs. the repository (empty = Claude restored the original code)'; echo '```diff'; git diff; echo '```'
+              [[ -f "$LOG_DIR/claude-summary.md" ]] && { echo '### Claude summary'; cat "$LOG_DIR/claude-summary.md"; }
+              [[ "$VERIFY" == "success" ]] || ok=false
+            fi
+            echo
+            [[ "$ok" == "true" ]] && echo "**PASSED**" || echo "**FAILED**"
+          } > "$LOG_DIR/result.md"
+          tee -a "$GITHUB_STEP_SUMMARY" < "$LOG_DIR/result.md"
+          [[ "$ok" == "true" ]]
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-check-logs
+          path: ${{ env.LOG_DIR }}
+          if-no-files-found: ignore
+          include-hidden-files: true

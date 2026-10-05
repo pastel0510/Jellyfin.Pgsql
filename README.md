@@ -83,6 +83,10 @@ One-time setup:
 - Settings → Secrets and variables → Actions → add `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or
   `ANTHROPIC_API_KEY`. Without it the workflow still bumps and verifies, but cannot fix failures.
 
+To check the Claude step works, run **🤖 Claude Check** from the Actions tab: `quick` makes one short Claude call with the same
+credential, model and permissions; `drill` breaks the build on purpose in that run, lets Claude find and fix it, and verifies
+the fix (uses more of your Claude usage). Neither commits anything.
+
 Pull requests opened by the workflow don't trigger other workflows; they were already verified in the same run.
 After merging, publish the image with a release or by running the Docker workflow.
 
