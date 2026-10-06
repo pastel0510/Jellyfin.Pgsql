@@ -22,7 +22,7 @@ This plugin adds postgres SQL support to [Jellyfin Server](https://github.com/je
 
 # How to use it
 
-You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/pastel0510/jellyfin.pgsql:12.1`.
+You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/pastel0510/jellyfin.pgsql:12.2`.
 
 Images are published automatically whenever a change to the plugin or the image is merged. Each build gets a fixed tag
 `<version>-<n>` (for example `12.1-2`) and a [release](https://github.com/pastel0510/Jellyfin.Pgsql/releases) whose notes
@@ -34,7 +34,7 @@ You need to add the connection parameters as environment variables in your compo
 ```yaml
 services:
   jellyfin:
-    image: ghcr.io/pastel0510/jellyfin.pgsql:12.1
+    image: ghcr.io/pastel0510/jellyfin.pgsql:12.2
     volumes:
       - /path/to/config:/config
       - /path/to/cache:/cache
@@ -58,7 +58,7 @@ The password is only read from the environment. On every start the entrypoint re
 ### Upgrading and pinning
 
 `:12.1` is fine for trying the image. For a server you rely on, pin the exact build and its digest as given in the
-release notes, for example `ghcr.io/pastel0510/jellyfin.pgsql:12.1-2@sha256:...`: with a moving tag, a restart can
+release notes, for example `ghcr.io/pastel0510/jellyfin.pgsql:12.2@sha256:...`: with a moving tag, a restart can
 silently pull a build that adds a database migration. Migrations run on the first start of the new image and cannot
 be undone by going back to an older image, so before moving to a new build read its release notes and take a
 `pg_dump` of the database (the plugin also takes one automatically before migrating).
@@ -100,7 +100,7 @@ The image runs as root by default and then leaves root-owned files in `/config`;
 
 ## PostgreSQL version
 
-The image is built on Jellyfin 12.1 and ships the PostgreSQL 18 client tools. Jellyfin takes a `pg_dump` backup before
+The image is built on Jellyfin 12.2 and ships the PostgreSQL 18 client tools. Jellyfin takes a `pg_dump` backup before
 every database migration, and `pg_dump` refuses to dump a server newer than itself, so use a PostgreSQL server
 **version 18 or older** (18 recommended; see [`docker/docker-compose.yaml`](docker/docker-compose.yaml)). PostgreSQL 16 is
 confirmed working, including with a non-superuser role that owns the database, and on a 3-instance CloudNativePG cluster
