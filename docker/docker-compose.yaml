@@ -1,7 +1,7 @@
 services:
   # no port exposed -- use a reverse proxy to jellyfin:8096/tcp or expose port 8096/tcp
   jellyfin:
-    image: ghcr.io/pastel0510/jellyfin.pgsql:12.1 # or build: /path/to/Jellyfin.Pgsql with dockerfile: docker/Dockerfile
+    image: ghcr.io/pastel0510/jellyfin.pgsql:12.2 # or build: /path/to/Jellyfin.Pgsql with dockerfile: docker/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
