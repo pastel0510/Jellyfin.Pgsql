@@ -6,6 +6,15 @@
         "overview": "Store the Jellyfin database in PostgreSQL",
         "owner": "pastel0510",
         "category": "General",
-        "versions": []
+        "versions": [
+            {
+                "version": "12.2.4.0",
+                "changelog": "Image 12.2-4 (Jellyfin 12.2). Release notes: https://github.com/pastel0510/Jellyfin.Pgsql/releases/tag/12.2-4",
+                "targetAbi": "12.2.0.0",
+                "sourceUrl": "https://github.com/pastel0510/Jellyfin.Pgsql/releases/download/12.2-4/jellyfin-pgsql_12.2.4.0.zip",
+                "checksum": "8f35bd46e57ad4cd84cad85827500073",
+                "timestamp": "2026-10-07T06:43:25Z"
+            }
+        ]
     }
 ]
