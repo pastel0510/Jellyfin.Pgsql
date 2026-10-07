@@ -13,7 +13,7 @@ built on `jellyfin/jellyfin`.
 - `scripts/verify.sh`: Release build (warnings are errors), migration/model check, Docker build, smoke test.
 - `SKIP_DOCKER=1 scripts/verify.sh`: build and migration check only.
 - `FULL=1 scripts/verify.sh`: also the linuxserver-layout smoke test and `scripts/migration-test.sh` (SQLite to
-  PostgreSQL migration end to end; needs sqlite3, psql and pgloader). CI runs this.
+  PostgreSQL and back end to end; needs sqlite3, psql, pgloader and python3 with psycopg 3). CI runs this.
 
 ## Rules
 
@@ -23,6 +23,8 @@ built on `jellyfin/jellyfin`.
   Never edit migrations that were already released.
 - Raw SQL in upstream SQLite migrations is not carried over by EF; port data fixes to PostgreSQL syntax by hand.
 - The pg_dump/psql arguments in `scripts/smoke-test.sh` mirror `PgSqlDatabaseProvider`; keep them in sync.
+- `scripts/migrate-postgres-to-sqlite.py` writes values the way EF Core's SQLite provider stores them; a new column
+  type in the model needs a conversion there (the migration test fails on an unknown format).
 - Keep PostgreSQL behaving like SQLite where Jellyfin depends on it (NULL ordering, case-insensitive `LIKE`, `DateTime.MinValue`, no JIT; see
   "Differences from SQLite" in the README). The smoke test checks these.
 - Every merge to master that changes the plugin or Docker files is published automatically (Docker workflow after

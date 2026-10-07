@@ -5,7 +5,7 @@
 #       scripts/migrate-sqlite-to-postgres.sh /path/to/jellyfin.db
 #
 # Prerequisites:
-#   - Jellyfin is stopped. The SQLite database and the plugin image are the same Jellyfin version.
+#   - Jellyfin is stopped. The SQLite database and the plugin image are the same Jellyfin version (checked).
 #   - The PostgreSQL database was seeded: the Jellyfin.Pgsql image was started once against it with an empty
 #     config directory and stopped again (see the README). The script refuses to run otherwise.
 #   - sqlite3 and psql on the PATH, and pgloader on the PATH or PGLOADER_IMAGE set to a pgloader Docker image
@@ -13,7 +13,7 @@
 #
 # What it does (the original jellyfin.db is only read, never changed):
 #   1. takes a consistent copy (WAL checkpointed, integrity_check must be ok) into a scratch directory;
-#   2. checks that both databases have the same tables;
+#   2. checks that both databases have the same tables and were migrated by the same Jellyfin version;
 #   3. rewrites PostgreSQL array columns from EF's SQLite JSON form ([1,2]) to array literals ({1,2}) and trims
 #      strings longer than PostgreSQL's varchar(n) limits (SQLite does not enforce them), in the copy;
 #   4. loads the data with pgloader (data only, into the seeded schema);
@@ -82,6 +82,26 @@ if ! diff -u "$WORK_DIR/tables.sqlite" "$WORK_DIR/tables.postgres" >"$WORK_DIR/t
     fail "the databases have different tables (- only in SQLite, + only in PostgreSQL); are both the same Jellyfin version?"
 fi
 echo "$(wc -l <"$WORK_DIR/tables.sqlite") tables"
+
+step "Comparing Jellyfin versions"
+# Jellyfin records its own migrations in __EFMigrationsHistory with its four-part version (12.2.0.0); EF schema
+# migrations carry the EF Core version. The seed has every Jellyfin migration of the image's version, so one the
+# SQLite database lacks means the server is older than the image. Its rows are not loaded either way.
+lite "SELECT MigrationId FROM __EFMigrationsHistory WHERE ProductVersion GLOB '[0-9]*.[0-9]*.[0-9]*.[0-9]*' ORDER BY 1;" \
+    >"$WORK_DIR/code-migrations.sqlite"
+pg -c "SELECT \"MigrationId\" FROM \"__EFMigrationsHistory\" WHERE \"ProductVersion\" ~ '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$' ORDER BY \"MigrationId\" COLLATE \"C\"" \
+    >"$WORK_DIR/code-migrations.postgres"
+sqlite_version="$(lite "SELECT ProductVersion FROM __EFMigrationsHistory WHERE ProductVersion GLOB '[0-9]*.[0-9]*.[0-9]*.[0-9]*';" | sort -V | tail -1)"
+image_version="$(pg -c "SELECT \"ProductVersion\" FROM \"__EFMigrationsHistory\" WHERE \"ProductVersion\" ~ '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$'" | sort -V | tail -1)"
+echo "SQLite: Jellyfin ${sqlite_version:-unknown}, PostgreSQL seed: Jellyfin ${image_version:-unknown}"
+missing="$(LC_ALL=C comm -13 "$WORK_DIR/code-migrations.sqlite" "$WORK_DIR/code-migrations.postgres")"
+if [[ -n "$missing" ]]; then
+    echo "$missing" | sed 's/^/  not run on SQLite: /' >&2
+    fail "the SQLite database is from an older Jellyfin (${sqlite_version:-unknown}) than the image (${image_version}). Migrate with the image of the server's version (for example ghcr.io/pastel0510/jellyfin.pgsql:12.1-2 for 12.1) and upgrade the image afterwards, or upgrade the SQLite server first; see \"Migrating from SQLite\" in the README"
+fi
+if [[ -n "$sqlite_version" && -n "$image_version" && "$(printf '%s\n%s\n' "$sqlite_version" "$image_version" | sort -V | tail -1)" != "$image_version" ]]; then
+    fail "the SQLite database was last migrated by Jellyfin $sqlite_version, newer than the image's $image_version; use the image of that version"
+fi
 
 step "Converting array columns and trimming over-length strings in the copy"
 while IFS='|' read -r table column; do

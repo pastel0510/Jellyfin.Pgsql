@@ -65,16 +65,18 @@ moving tag, a restart can silently pull a build that adds a database migration. 
 the new image and cannot be undone by going back to an older image, so before moving to a new build read its release
 notes and take a `pg_dump` of the database.
 
-Before running migrations the plugin also writes a `pg_dump` to `<data dir>/PgsqlBackups/` (`/config/data/PgsqlBackups`
-by default) and restores it if a migration fails. Jellyfin deletes that dump once the migrations succeed, so on its own
+Before running migrations the plugin also writes a `pg_dump` to `PgsqlBackups/` in Jellyfin's data directory
+(`/config/data/PgsqlBackups` with this image's default paths, `/config/data/data/PgsqlBackups` with the linuxserver
+layout) and restores it if a migration fails. Jellyfin deletes that dump once the migrations succeed, so on its own
 it does not help with a migration that succeeds but changes data you did not want changed. Since 12.2-2 the plugin
 keeps the newest dump and removes the older ones; `POSTGRES_KEEP_BACKUP=false` deletes it as before. The dump holds
 the whole database, including password hashes, and needs about as much space as the database.
 
 Known issues of a Jellyfin version are listed in the release notes of its builds. Upgrading to Jellyfin 12.2: its
 `HarmonizeConflictingUserData` migration can mark a watched item as unwatched (a Jellyfin bug that affects SQLite too).
-From 12.2-3 on the plugin's own migration resolves those rows first, preferring played and favourite; a server already
-upgraded with 12.2-1 or 12.2-2 may need one or two items marked as watched again.
+From 12.2-3 on the plugin's own migration resolves those rows first, preferring played and favourite. A server that
+already ran the routine (upgraded with 12.2-1 or 12.2-2, or upgraded to 12.2 on SQLite before migrating) may have one
+or two items to mark as watched again, in the item's menu or with `POST /UserPlayedItems/{itemId}?datePlayed=<date>`.
 
 Renovate's default Docker versioning reads the `-<n>` of these tags as a compatibility suffix and never offers a newer
 build. Add a package rule:
@@ -304,8 +306,15 @@ migration is added when the Jellyfin data model changes (see [Add migration](#ad
 database into PostgreSQL and checks the result. It is tested end to end in CI by
 [`scripts/migration-test.sh`](scripts/migration-test.sh), and was used to migrate a real library (84,000 items, 716,000
 rows) with identical counts, watch state and sort orders. It needs `sqlite3`, `psql` and `pgloader` (or Docker with
-`PGLOADER_IMAGE=ghcr.io/dimitri/pgloader:latest`). Use the same Jellyfin version on both sides, and keep a backup of your
-config directory.
+`PGLOADER_IMAGE=ghcr.io/dimitri/pgloader:latest`). Keep a backup of your config directory.
+
+Both sides must be the same Jellyfin version; the script compares the Jellyfin migrations recorded in both databases
+and stops if they differ. If your server runs an older Jellyfin than the newest image, migrate with the image of the
+server's version and upgrade the image afterwards: older builds stay published (for example `12.1-2` for Jellyfin
+12.1). This is the recommended way while a Jellyfin release has known issues in its own data migrations: they then run
+on PostgreSQL, where the plugin can correct them (see the 12.2 note under
+[Upgrading and pinning](#upgrading-and-pinning)). Upgrading the SQLite server first and then migrating with the newest
+image also works, but those migrations then run on SQLite as stock Jellyfin does.
 
 1. **Stop Jellyfin.** Work on a copy of your config directory if you can.
 2. **Seed the PostgreSQL database.** Start this image once against the empty database with an **empty** config
@@ -334,3 +343,35 @@ config directory.
 
 [`docker/jellyfindb.load`](docker/jellyfindb.load) is the pgloader load file for doing step 3 by hand; the script
 generates the same file and does the steps around it.
+
+# Switching back to SQLite
+
+[`scripts/migrate-postgres-to-sqlite.py`](scripts/migrate-postgres-to-sqlite.py) copies the PostgreSQL database back
+into a stock Jellyfin SQLite database. The same CI test migrates to PostgreSQL, writes there, converts back and runs a
+stock Jellyfin on the result. It needs `python3` with psycopg 3 (`pip install "psycopg[binary]"`, or the
+`python3-psycopg` package). Both sides must be the same Jellyfin version; the script checks it.
+
+1. **Stop Jellyfin.** The script refuses to run while other sessions of the database role are connected.
+2. **Seed a SQLite database:** start the stock `jellyfin/jellyfin` image of the same version once with an **empty**
+   config directory, wait for `Startup complete` in the log, then stop it. Do not run the setup wizard. Its
+   `data/jellyfin.db` supplies the SQLite schema and the migration history of that version.
+3. **Convert:**
+
+   ```sh
+   POSTGRES_HOST=postgres POSTGRES_DB=jellyfin POSTGRES_USER=jellyfin POSTGRES_PASSWORD=... \
+       scripts/migrate-postgres-to-sqlite.py /path/to/seed/data/jellyfin.db /path/to/new/jellyfin.db
+   ```
+
+   It reads all tables in one snapshot and writes the rows into a copy of the seed in the format stock Jellyfin uses
+   (upper-case GUIDs, `yyyy-MM-dd HH:mm:ss.FFFFFFF` UTC timestamps, 0/1 booleans, JSON arrays). It keeps the seed's
+   migration history, carries the identity sequences over, and then verifies row counts, foreign keys and
+   `integrity_check`, compares every row with PostgreSQL and checks every value's format. PostgreSQL stores
+   microseconds, so timestamps lose their 7th fractional digit; everything else round-trips.
+4. **Switch the config back:** put the new file at `data/jellyfin.db` (`data/data/jellyfin.db` with the linuxserver
+   layout), restore the SQLite `database.xml` (the `database.xml.sqlite` kept during the migration, or one with
+   `<DatabaseType>Jellyfin-SQLite</DatabaseType>`), remove the `plugins/PostgreSQL*` folders, and start the stock
+   image with your existing paths.
+
+Jellyfin's own backup and restore (Dashboard > Backups) is not a way to move between database providers: it restores
+the archive's migration history and `database.xml` of the provider it was made with, and its JSON round trip drops
+some values (for example the user of an avatar image) and renumbers rows. Use it only to restore the same setup.
