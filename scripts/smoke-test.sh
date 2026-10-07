@@ -243,12 +243,27 @@ if [[ -n "${UPGRADE_FROM:-}" ]]; then
         psql_q "UPDATE \"Users\" SET \"LastActivityDate\" = '-infinity'" >/dev/null
         echo "planted -infinity in Users.LastActivityDate"
     fi
+    # Two user data rows of one item that only differ in Played: Jellyfin 12.2's HarmonizeConflictingUserData can
+    # copy the unplayed one over the played one. The Jellyfin12.2_HarmonizeUserData migration resolves them first.
+    if [[ "$(psql_q "SELECT count(*) FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" LIKE '%HarmonizeUserData'")" == "0" ]]; then
+        psql_q "INSERT INTO \"UserData\" (\"ItemId\", \"UserId\", \"CustomDataKey\", \"IsFavorite\", \"PlayCount\", \"PlaybackPositionTicks\", \"Played\", \"LastPlayedDate\")
+            SELECT b.\"Id\", u.\"Id\", k.key, false, 1, 0, k.played, '2026-01-01 00:00:00+00'
+            FROM \"BaseItems\" b, \"Users\" u, (VALUES ('smoke-unplayed', false), ('smoke-played', true)) AS k(key, played)
+            WHERE b.\"Name\" = 'Smoke Test (2020)'" >/dev/null
+        HARMONIZE_PLANTED=1
+        echo "planted conflicting user data rows (played and unplayed)"
+    fi
     endstep
 
     step "Upgrading to $IMAGE"
     start_jellyfin "$IMAGE"
     login
     wait_for_movie
+    if [[ -n "${HARMONIZE_PLANTED:-}" ]]; then
+        [[ "$(psql_q "SELECT bool_and(\"Played\") FROM \"UserData\" WHERE \"CustomDataKey\" LIKE 'smoke-%'")" == "t" ]] \
+            || fail "conflicting user data was harmonized to unplayed (HarmonizeConflictingUserData tie)"
+        echo "conflicting user data harmonized to played"
+    fi
     endstep
 else
     step "Starting $IMAGE on an empty database"
