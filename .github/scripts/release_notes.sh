@@ -35,6 +35,12 @@ echo '```'
 echo "${IMAGE}:${TAG}@${DIGEST}"
 echo '```'
 echo
+# Set by the Docker workflow for builds that also publish the plugin package.
+if [[ -n "${PLUGIN_VERSION:-}" && -n "${PLUGIN_URL:-}" ]]; then
+    echo "Plugin package for servers without Docker: [${PLUGIN_URL##*/}](${PLUGIN_URL}) (plugin version ${PLUGIN_VERSION},"
+    echo "also offered by the plugin repository; see [Installing without Docker](${REPO_URL}#installing-without-docker))."
+    echo
+fi
 
 echo "## Database migrations"
 echo

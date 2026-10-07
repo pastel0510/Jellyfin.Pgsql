@@ -27,6 +27,6 @@ built on `jellyfin/jellyfin`.
   "Differences from SQLite" in the README). The smoke test checks these.
 - Every merge to master that changes the plugin or Docker files is published automatically (Docker workflow after
   Verify): `<version>-<n>` plus the moving `<version>` and `latest` tags, a git tag and a GitHub release whose notes list new
-  migrations. Docs use the moving tag for trying it and recommend pinning `<version>-<n>@<digest>` for production.
+  migrations, with the plugin zip attached and added to `manifest.json` (`.github/scripts/plugin_manifest.py`). Docs use the moving tag for trying it and recommend pinning `<version>-<n>@<digest>` for production.
 - No emoji anywhere in the repository (code, docs, workflow names, commit messages, PR texts); keep the tone plain and
   professional. `scripts/verify.sh` fails on emoji.

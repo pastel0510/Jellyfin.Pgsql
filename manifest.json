@@ -1,12 +1,11 @@
 [
     {
-        "guid": "ecb9be01-627b-4904-a28e-8d0d5b481272",
-        "name": "Postgre-SQL For Jellyfin",
-        "description": "Experimental PostgreSQL provider for Jellyfin.",
-        "overview": "Jellyfin",
-        "owner": "JPVenson",
+        "guid": "27e7ad18-ea71-4b19-b1a9-6e4c2e4d5e18",
+        "name": "PostgreSQL Database",
+        "description": "PostgreSQL database provider for Jellyfin, maintained in the pastel0510/Jellyfin.Pgsql fork. Needs the PostgreSQL client tools (pg_dump, psql) on the server and a database.xml that selects the provider; see https://github.com/pastel0510/Jellyfin.Pgsql#installing-without-docker.",
+        "overview": "Store the Jellyfin database in PostgreSQL",
+        "owner": "pastel0510",
         "category": "General",
-        "versions": [
-        ]
+        "versions": []
     }
 ]

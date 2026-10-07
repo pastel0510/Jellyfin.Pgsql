@@ -111,6 +111,59 @@ linuxserver install over), set:
 The image runs as root by default and then leaves root-owned files in `/config`; running it as the volume's owner with
 `user:` works without further changes, including hardware transcoding through `/dev/dri` when that user may access it.
 
+### Installing without Docker
+
+Each build is also published as a plugin package, `jellyfin-pgsql_<plugin version>.zip`, attached to its
+[release](https://github.com/pastel0510/Jellyfin.Pgsql/releases). The plugin version follows the image build: 12.2-3 is plugin
+12.2.3.0 (after a Jellyfin patch release the third number keeps counting up instead of starting again). The server needs:
+
+- Jellyfin of the version in the release (the plugin's `targetAbi`);
+- the PostgreSQL client tools of the newest major version you run (`pg_dump`, `psql`; `postgresql-client-18` from the
+  PostgreSQL apt repository) on the `PATH` of the Jellyfin service. Jellyfin takes a backup with them before every
+  database migration, including the first start, and does not start without them.
+
+First installation:
+
+1. Extract the zip into `<data dir>/plugins/PostgreSQL Database_<plugin version>/` (for the Debian package,
+   `/var/lib/jellyfin/plugins/`). The folder name must start with `PostgreSQL`.
+2. Create `<config dir>/database.xml` (for the Debian package, `/etc/jellyfin/database.xml`):
+
+   ```xml
+   <?xml version="1.0" encoding="utf-8"?>
+   <DatabaseConfigurationOptions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+     <DatabaseType>PLUGIN_PROVIDER</DatabaseType>
+     <CustomProviderOptions>
+       <PluginAssembly>Jellyfin.Plugin.Pgsql.dll</PluginAssembly>
+       <PluginName>PostgreSQL</PluginName>
+       <ConnectionString>Host=db.example;Port=5432;Database=jellyfin;Username=jellyfin</ConnectionString>
+     </CustomProviderOptions>
+     <LockingBehavior>NoLock</LockingBehavior>
+   </DatabaseConfigurationOptions>
+   ```
+
+3. Give the service the password and any other setting from [How to use it](#how-to-use-it) as environment
+   variables, for example with `systemctl edit jellyfin`:
+
+   ```ini
+   [Service]
+   Environment=POSTGRES_PASSWORD=change-me
+   Restart=on-failure
+   ```
+
+4. Start Jellyfin. On an empty database it runs the setup wizard; to move an existing SQLite server, follow
+   [Migrating from SQLite](#migrating-from-sqlite) first.
+
+Updates come from the plugin repository: in Dashboard > Plugins > Repositories add
+`https://raw.githubusercontent.com/pastel0510/Jellyfin.Pgsql/master/manifest.json`, then update the plugin from the
+catalog and restart. Jellyfin loads a database plugin before it removes the folder of the older version, so the first
+start after an update loads the old version; the plugin then stops that start with "The PostgreSQL plugin was updated
+from ... start Jellyfin again", before anything runs, and sets the old version aside. The next start runs the new
+version (with `Restart=on-failure` this happens by itself). Read the release notes before updating: a build that adds
+a database migration cannot be undone by going back to an older version.
+
+Do not install the plugin from the repository into the Docker image; the image brings its own copy and removes other
+copies on start.
+
 ## PostgreSQL version
 
 The image is built on Jellyfin 12.2 and ships the PostgreSQL 18 client tools. Jellyfin takes a `pg_dump` backup before
@@ -237,7 +290,9 @@ Images are built and published by the [Build & Publish Docker Image](.github/wor
 2. After the merge, Verify runs again on `master`. If it passes and the merge changed the plugin or the Docker files,
    the image is built for linux/amd64 and linux/arm64 and pushed as `<version>-<n>`, `<version>` and `latest`.
 3. The build is tagged in git and gets a GitHub release with the image digest, the changes since the previous build
-   and any new database migration.
+   and any new database migration, and the plugin package for [installs without Docker](#installing-without-docker).
+4. The plugin package is added to [`manifest.json`](manifest.json), the plugin repository manifest, with a commit to
+   `master`.
 
 New Jellyfin versions arrive through the [automated update](#automated-jellyfin-updates) pull request. A database
 migration is added when the Jellyfin data model changes (see [Add migration](#add-migration)).
