@@ -62,6 +62,10 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             .UseNpgsql(connectionBuilder.ToString(), pgSqlOptions =>
             {
                 pgSqlOptions.MigrationsAssembly(GetType().Assembly.FullName);
+
+                // Buffer query results: Jellyfin runs commands while iterating a query, which SQLite allows and
+                // Npgsql (no MARS) does not.
+                pgSqlOptions.ExecutionStrategy(dependencies => new BufferingExecutionStrategy(dependencies));
             });
 
         // Order NULLs like SQLite (first ascending, last descending), which Jellyfin's sort orders assume.
