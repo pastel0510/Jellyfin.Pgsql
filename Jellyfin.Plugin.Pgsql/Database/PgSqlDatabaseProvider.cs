@@ -74,6 +74,12 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             options.ReplaceService<IQuerySqlGeneratorFactory, SqliteNullOrderingQuerySqlGeneratorFactory>();
         }
 
+        // Match EF.Functions.Like case-insensitively like SQLite, which Jellyfin's search relies on.
+        if (!IsFalse(GetEnvironmentVariable("POSTGRES_CASE_INSENSITIVE_LIKE")))
+        {
+            options.ReplaceService<IMethodCallTranslatorProvider, SqliteLikeMethodCallTranslatorProvider>();
+        }
+
         var enableSensitiveDataLogging = GetCustomDatabaseOption(customOptions, "EnableSensitiveDataLogging", e => e.Equals(bool.TrueString, StringComparison.OrdinalIgnoreCase), () => false);
         if (enableSensitiveDataLogging)
         {
@@ -95,9 +101,35 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         {
             if (context.Database.IsNpgsql())
             {
-                await context.Database.ExecuteSqlRawAsync("VACUUM ANALYZE", cancellationToken).ConfigureAwait(false);
+                // Like the SQLite provider: statistics taken while the library is empty make the planner treat every
+                // table as empty once it fills up, so only VACUUM until there are items.
+                var analyze = await HasLibraryItemsAsync(context, cancellationToken).ConfigureAwait(false);
+                await context.Database.ExecuteSqlRawAsync(analyze ? "VACUUM ANALYZE" : "VACUUM", cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation("PostgreSQL database optimized successfully");
             }
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task RefreshStatistics(CancellationToken cancellationToken)
+    {
+        if (DbContextFactory is null)
+        {
+            return;
+        }
+
+        var context = await DbContextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using (context.ConfigureAwait(false))
+        {
+            if (!context.Database.IsNpgsql() || !await HasLibraryItemsAsync(context, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
+
+            // Autovacuum also analyzes, but only once enough rows changed and on its own schedule; Jellyfin calls this
+            // after every library scan so the next queries are planned on current statistics.
+            _logger.LogInformation("Analyzing the PostgreSQL database");
+            await context.Database.ExecuteSqlRawAsync("ANALYZE", cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -245,7 +277,8 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
     public Task DeleteBackup(string key)
     {
         var connectionBuilder = GetConnectionBuilder(null);
-        var backupFile = Path.Combine(_applicationPaths.DataPath, BackupFolderName, $"{key}_{connectionBuilder.Database}.sql");
+        var backupFolder = Path.Combine(_applicationPaths.DataPath, BackupFolderName);
+        var backupFile = Path.Combine(backupFolder, $"{key}_{connectionBuilder.Database}.sql");
 
         if (!File.Exists(backupFile))
         {
@@ -253,8 +286,26 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
             return Task.CompletedTask;
         }
 
-        File.Delete(backupFile);
-        _logger.LogInformation("Deleted backup file: {BackupFile}", backupFile);
+        // Jellyfin deletes the backup as soon as the migrations succeed, so it only helps against a migration that
+        // fails during that start. Keep the newest one instead, for a migration that succeeded but changed data in a
+        // way nobody wanted, and remove the older ones so they don't pile up. POSTGRES_KEEP_BACKUP=false deletes it.
+        if (IsFalse(GetEnvironmentVariable("POSTGRES_KEEP_BACKUP")))
+        {
+            File.Delete(backupFile);
+            _logger.LogInformation("Deleted backup file: {BackupFile}", backupFile);
+            return Task.CompletedTask;
+        }
+
+        foreach (var olderBackup in Directory.EnumerateFiles(backupFolder, $"*_{connectionBuilder.Database}.sql"))
+        {
+            if (!string.Equals(olderBackup, backupFile, StringComparison.Ordinal))
+            {
+                File.Delete(olderBackup);
+                _logger.LogInformation("Deleted older backup file: {BackupFile}", olderBackup);
+            }
+        }
+
+        _logger.LogInformation("Keeping the pre-migration backup {BackupFile} until the next one replaces it", backupFile);
         return Task.CompletedTask;
     }
 
@@ -273,6 +324,12 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
 
         await dbContext.Database.ExecuteSqlRawAsync(truncateAllQuery).ConfigureAwait(false);
         _logger.LogInformation("PostgreSQL database tables purged successfully");
+    }
+
+    private static Task<bool> HasLibraryItemsAsync(JellyfinDbContext context, CancellationToken cancellationToken)
+    {
+        // Folders and the seeded placeholder exist before any library has been scanned.
+        return context.BaseItems.AnyAsync(e => !e.IsFolder && e.Type != "PLACEHOLDER", cancellationToken);
     }
 
     private T? GetCustomDatabaseOption<T>(ICollection<CustomDatabaseOption>? options, string key, Func<string, T> converter, Func<T>? defaultValue = null)

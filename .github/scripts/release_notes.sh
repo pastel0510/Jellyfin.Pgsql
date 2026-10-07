@@ -46,9 +46,10 @@ else
     if [[ ${#migrations[@]} -eq 0 ]]; then
         echo "None since ${PREVIOUS}. Switching back to ${PREVIOUS} is safe."
     else
-        echo "**This build adds database migrations.** They run on the first start of this image, after the plugin's"
-        echo "automatic \`pg_dump\` backup. Going back to an older image afterwards is not supported: restore a backup"
-        echo "taken before the upgrade instead. Take your own \`pg_dump\` before upgrading."
+        echo "**This build adds database migrations.** They run on the first start of this image. The plugin takes a"
+        echo "\`pg_dump\` first and restores it if a migration fails; builds from 12.2-2 on also keep the newest such dump"
+        echo "in \`<data dir>/PgsqlBackups\` after a successful upgrade. Going back to an older image afterwards is not"
+        echo "supported: restore a backup taken before the upgrade instead. Take your own \`pg_dump\` before upgrading."
         echo
         for migration in "${migrations[@]}"; do
             echo "- \`${migration}\`"
@@ -56,6 +57,16 @@ else
     fi
 fi
 echo
+
+# Known issues of a Jellyfin version, kept in .github/release-notes/<version>.md of the checked-out tree, so that
+# issues found after a build was released can be added to its notes by re-running the Release Notes workflow.
+KNOWN_ISSUES="$(dirname "$0")/../release-notes/${JELLYFIN_VERSION}.md"
+if [[ -s "$KNOWN_ISSUES" ]]; then
+    echo "## Known issues in Jellyfin ${JELLYFIN_VERSION}"
+    echo
+    cat "$KNOWN_ISSUES"
+    echo
+fi
 
 if [[ -n "$PREVIOUS" ]]; then
     echo "## Changes since ${PREVIOUS}"

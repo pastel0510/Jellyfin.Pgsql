@@ -50,6 +50,8 @@ services:
       # - POSTGRES_COMMAND_TIMEOUT=30           # seconds per command, 0 = no limit; raise for very large libraries
       # - POSTGRES_JIT=off                      # see "Differences from SQLite"
       # - POSTGRES_REVERSE_NULL_ORDERING=true   # see "Differences from SQLite"
+      # - POSTGRES_CASE_INSENSITIVE_LIKE=true   # see "Differences from SQLite"
+      # - POSTGRES_KEEP_BACKUP=true             # keep the newest pre-migration pg_dump, see "Upgrading and pinning"
 ```
 
 The password is only read from the environment. On every start the entrypoint records the other connection settings in
@@ -61,7 +63,17 @@ The password is only read from the environment. On every start the entrypoint re
 and its digest as given in the release notes (`ghcr.io/pastel0510/jellyfin.pgsql:<version>-<n>@sha256:...`): with a
 moving tag, a restart can silently pull a build that adds a database migration. Migrations run on the first start of
 the new image and cannot be undone by going back to an older image, so before moving to a new build read its release
-notes and take a `pg_dump` of the database (the plugin also takes one automatically before migrating).
+notes and take a `pg_dump` of the database.
+
+Before running migrations the plugin also writes a `pg_dump` to `<data dir>/PgsqlBackups/` (`/config/data/PgsqlBackups`
+by default) and restores it if a migration fails. Jellyfin deletes that dump once the migrations succeed, so on its own
+it does not help with a migration that succeeds but changes data you did not want changed. Since 12.2-2 the plugin
+keeps the newest dump and removes the older ones; `POSTGRES_KEEP_BACKUP=false` deletes it as before. The dump holds
+the whole database, including password hashes, and needs about as much space as the database.
+
+Known issues of a Jellyfin version are listed in the release notes of its builds. Upgrading to Jellyfin 12.2: its
+`HarmonizeConflictingUserData` migration can mark one or two watched items as unwatched (a Jellyfin bug that affects
+SQLite too); mark them as watched again.
 
 Renovate's default Docker versioning reads the `-<n>` of these tags as a compatibility suffix and never offers a newer
 build. Add a package rule:
@@ -125,10 +137,17 @@ Jellyfin's queries were written for SQLite. The plugin adjusts PostgreSQL so res
 - **NULLs sort like in SQLite**: first in ascending and last in descending order (PostgreSQL's default is the
   opposite), so lists such as "continue watching", next up and sorting by rating or date come back in the same order.
   `POSTGRES_REVERSE_NULL_ORDERING=false` turns this off.
+- **`LIKE` ignores case, as in SQLite.** Jellyfin's search matches the original title and sort name with
+  `EF.Functions.Like`, which is case-insensitive on SQLite and case-sensitive on PostgreSQL, so searching "amelie" did
+  not find an item whose original title is "Amelie". The plugin translates it to `ILIKE`; with the `C` collation it
+  uses, `ILIKE` folds only ASCII letters, like SQLite. `POSTGRES_CASE_INSENSITIVE_LIKE=false` turns this off.
 - **Query results are read completely before they are used.** SQLite lets Jellyfin run a command while it is still
   reading a query on the same connection; PostgreSQL does not (Npgsql reports "A command is already in progress"), and
   Jellyfin 12.2's rating migration depends on it. The plugin uses an EF Core execution strategy that buffers results
   (as EF does for retrying strategies) but never retries.
+- **Planner statistics are refreshed after every library scan** (`ANALYZE`, from Jellyfin 12.2), and the scheduled
+  database optimisation runs `VACUUM ANALYZE`, as the SQLite provider does. Both skip `ANALYZE` while the library holds
+  no items yet: statistics of empty tables would make the planner choose full scans once the library fills up.
 - **`DateTime.MinValue` is stored as `0001-01-01`**, not `-infinity`, so Jellyfin's date arithmetic in queries works
   (sorting by premiere date for items with only a production year). Values stored as infinity by earlier versions are
   converted by a database migration on the first start.
@@ -156,9 +175,12 @@ a specific tag). When a newer stable Jellyfin release has its Docker image and N
 3. runs [`scripts/verify.sh`](scripts/verify.sh): Release build, migration check, Docker build and
    [`scripts/smoke-test.sh`](scripts/smoke-test.sh) against PostgreSQL 18 (startup wizard, login, library scan with a real
    video, upgrade from the newest published image, backup and restore);
-4. if anything fails, or upstream added raw SQL migrations that may need a PostgreSQL port, Claude Code fixes or reviews it
-   and the verification runs again;
-5. opens a pull request `automation/jellyfin-<version>` (a draft if verification still fails).
+4. collects the upstream changes to Jellyfin's database layer since the previous release (the provider interface, the
+   SQLite provider, migrations, backup and maintenance code) and any SQLite-specific code added elsewhere;
+5. has Claude Code fix any failure and review those upstream changes, including the ones that break nothing, such as
+   a new provider feature the PostgreSQL provider should implement; then the verification runs again;
+6. opens a pull request `automation/jellyfin-<version>` (a draft if verification still fails) with Claude's summary
+   and a checklist of the upstream changes it reviewed.
 
 One-time setup:
 - Actions > enable workflows (forks start with them disabled).
@@ -171,7 +193,9 @@ credential, model and permissions; `drill` breaks the build on purpose in that r
 the fix (uses more of your Claude usage). Neither commits anything.
 
 Pull requests opened by the workflow don't trigger other workflows; they were already verified in the same run.
-After merging, publish the image with a release or by running the Docker workflow.
+After the merge the image is published automatically (see [Releases](#releases)).
+
+The upstream review means Claude runs for every Jellyfin release, not only when something fails.
 
 Every push and pull request is also scanned for committed secrets (API keys, tokens, passwords) by the
 [Secret Scan](.github/workflows/secret-scan.yaml) workflow, which runs Gitleaks over the full git history.
