@@ -72,8 +72,9 @@ keeps the newest dump and removes the older ones; `POSTGRES_KEEP_BACKUP=false` d
 the whole database, including password hashes, and needs about as much space as the database.
 
 Known issues of a Jellyfin version are listed in the release notes of its builds. Upgrading to Jellyfin 12.2: its
-`HarmonizeConflictingUserData` migration can mark one or two watched items as unwatched (a Jellyfin bug that affects
-SQLite too); mark them as watched again.
+`HarmonizeConflictingUserData` migration can mark a watched item as unwatched (a Jellyfin bug that affects SQLite too).
+From 12.2-3 on the plugin's own migration resolves those rows first, preferring played and favourite; a server already
+upgraded with 12.2-1 or 12.2-2 may need one or two items marked as watched again.
 
 Renovate's default Docker versioning reads the `-<n>` of these tags as a compatibility suffix and never offers a newer
 build. Add a package rule:
