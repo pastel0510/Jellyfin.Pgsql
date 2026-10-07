@@ -116,12 +116,18 @@ jobs:
           MAX_ROLLING=$(grep -oP "^${ESCAPED_VERSION}-\K[0-9]+$" <<<"$EXISTING_TAGS" | sort -n | tail -1 || true)
 
           IMAGE_TAG="${JELLYFIN_VERSION}-$(( ${MAX_ROLLING:-0} + 1 ))"
+
+          # The plugin version follows the build number, checked against the plugin repository manifest on master so
+          # that it only goes up (publishes are serialised, so the manifest there is current).
+          git show origin/master:manifest.json > "$RUNNER_TEMP/manifest.json" 2>/dev/null || cp manifest.json "$RUNNER_TEMP/manifest.json"
+          PLUGIN_VERSION="$(python3 .github/scripts/plugin_manifest.py next-version "$RUNNER_TEMP/manifest.json" "$JELLYFIN_VERSION" "$(( ${MAX_ROLLING:-0} + 1 ))")"
           {
             echo "image=$IMAGE"
             echo "jellyfin_version=$JELLYFIN_VERSION"
             echo "image_tag=$IMAGE_TAG"
+            echo "plugin_version=$PLUGIN_VERSION"
           } >> "$GITHUB_OUTPUT"
-          echo "Computed image: ${IMAGE}:${IMAGE_TAG}"
+          echo "Computed image: ${IMAGE}:${IMAGE_TAG}, plugin version ${PLUGIN_VERSION}"
 
       - name: Docker metadata
         id: meta
@@ -164,10 +170,36 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            PLUGIN_VERSION=${{ steps.version.outputs.plugin_version }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Package the plugin for installs without Docker
+        id: package
+        if: env.PUSH == 'true'
+        env:
+          IMAGE: ${{ steps.version.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PLUGIN_VERSION: ${{ steps.version.outputs.plugin_version }}
+        run: |
+          set -euo pipefail
+          # The package holds exactly the plugin files of the image just published.
+          docker pull --quiet --platform linux/amd64 "${IMAGE}@${DIGEST}" >/dev/null
+          cid="$(docker create --platform linux/amd64 "${IMAGE}@${DIGEST}")"
+          mkdir -p "$RUNNER_TEMP/plugin"
+          docker cp "$cid:/jellyfin-pgsql/plugin/." "$RUNNER_TEMP/plugin/"
+          docker rm "$cid" >/dev/null
+          zip_name="jellyfin-pgsql_${PLUGIN_VERSION}.zip"
+          (cd "$RUNNER_TEMP/plugin" && zip -q -X -r "$RUNNER_TEMP/$zip_name" .)
+          unzip -l "$RUNNER_TEMP/$zip_name"
+          {
+            echo "zip=$RUNNER_TEMP/$zip_name"
+            echo "zip_name=$zip_name"
+            echo "checksum=$(md5sum "$RUNNER_TEMP/$zip_name" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Tag the build and publish its release notes
         if: env.PUSH == 'true'
@@ -177,9 +209,47 @@ jobs:
           IMAGE: ${{ steps.version.outputs.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
           LATEST: ${{ github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master' }}
+          PLUGIN_VERSION: ${{ steps.version.outputs.plugin_version }}
+          PLUGIN_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.version.outputs.image_tag }}/${{ steps.package.outputs.zip_name }}
+          ZIP: ${{ steps.package.outputs.zip }}
         run: |
           set -euo pipefail
           sha="$(git rev-parse HEAD)"
           .github/scripts/release_notes.sh "$TAG" "$sha" "$IMAGE" "$DIGEST" > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
-          gh release create "$TAG" --target "$sha" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest="$LATEST"
+          gh release create "$TAG" "$ZIP" --target "$sha" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest="$LATEST"
+
+      - name: Add the build to the plugin repository manifest
+        # Only builds of master; the manifest lists what a plugin repository offers for updates.
+        if: env.PUSH == 'true' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.image_tag }}
+          JELLYFIN_VERSION: ${{ steps.version.outputs.jellyfin_version }}
+          PLUGIN_VERSION: ${{ steps.version.outputs.plugin_version }}
+          PLUGIN_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.version.outputs.image_tag }}/${{ steps.package.outputs.zip_name }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.version.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          target_abi="$(grep -oP '^targetAbi: "\K[^"]+' build.yaml)"
+          cp .github/scripts/plugin_manifest.py "$RUNNER_TEMP/"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # A merge can land while this runs; rebuild the commit on the new master and try again.
+          for attempt in 1 2 3; do
+            git fetch --quiet "$remote" master
+            git checkout --quiet -B manifest-update FETCH_HEAD
+            python3 "$RUNNER_TEMP/plugin_manifest.py" add manifest.json --version "$PLUGIN_VERSION" \
+              --target-abi "$target_abi" --source-url "$PLUGIN_URL" --checksum "$CHECKSUM" \
+              --changelog "Image ${TAG} (Jellyfin ${JELLYFIN_VERSION}). Release notes: ${RELEASE_URL}"
+            git commit --quiet -m "Add ${TAG} (plugin ${PLUGIN_VERSION}) to the plugin manifest" manifest.json
+            if git push --quiet "$remote" HEAD:master; then
+              echo "manifest.json on master lists plugin ${PLUGIN_VERSION}"
+              exit 0
+            fi
+            sleep $(( attempt * 5 ))
+          done
+          echo "::error::Could not push the manifest update to master"
+          exit 1

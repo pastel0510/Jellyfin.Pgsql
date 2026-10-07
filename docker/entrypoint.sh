@@ -15,6 +15,16 @@ rm -rf "${PLUGIN_DIR}"
 mkdir -p "${PLUGIN_DIR}"
 cp -r /jellyfin-pgsql/plugin/. "${PLUGIN_DIR}/"
 
+# The image brings its own copy of the plugin. Another one, installed from a plugin repository, would make Jellyfin load
+# two versions of the same assembly and fail to start, so remove it.
+for other in "${DATA_DIR}"/plugins/*/; do
+    other="${other%/}"
+    if [ "${other}" != "${PLUGIN_DIR}" ] && [ -e "${other}/Jellyfin.Plugin.Pgsql.dll" ]; then
+        echo "Removing ${other}: this image already contains the PostgreSQL plugin" >&2
+        rm -rf "${other}"
+    fi
+done
+
 # Create database.xml if it doesn't exist
 if [ ! -f "${DATABASE_XML}" ]; then
     mkdir -p "${CONFIG_DIR}"

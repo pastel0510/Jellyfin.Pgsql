@@ -13,9 +13,11 @@ COPY Jellyfin.Plugin.Pgsql.sln .
 COPY build.yaml .
 COPY Jellyfin.Plugin.Pgsql/ ./Jellyfin.Plugin.Pgsql/
 
-# Restore and publish (no --runtime: output is identical for amd64/arm64)
+# Restore and publish (no --runtime: output is identical for amd64/arm64). The Docker workflow passes the plugin
+# version of the build (<major>.<minor>.<k>.0, as listed in manifest.json).
+ARG PLUGIN_VERSION=1.0.0.0
 RUN dotnet restore Jellyfin.Plugin.Pgsql.sln
-RUN dotnet publish Jellyfin.Plugin.Pgsql.sln -c Release --no-restore -o /app/publish
+RUN dotnet publish Jellyfin.Plugin.Pgsql.sln -c Release --no-restore -p:Version=${PLUGIN_VERSION} -o /app/publish
 
 # Final stage - Jellyfin with plugin
 FROM jellyfin/jellyfin:12.2

@@ -44,6 +44,8 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
         // -infinity plus any interval stays -infinity. Must be set before Npgsql's first type mapping; values
         // already stored as infinity are converted by the Jellyfin12.1_DateTimeInfinity migration.
         AppContext.SetSwitch("Npgsql.DisableDateTimeInfinityConversions", true);
+
+        HandleOtherCopies();
     }
 
     /// <inheritdoc/>
@@ -324,6 +326,116 @@ public sealed class PgSqlDatabaseProvider : IJellyfinDatabaseProvider
 
         await dbContext.Database.ExecuteSqlRawAsync(truncateAllQuery).ConfigureAwait(false);
         _logger.LogInformation("PostgreSQL database tables purged successfully");
+    }
+
+    private void HandleOtherCopies()
+    {
+        // Jellyfin loads the database provider from the first plugin folder whose name starts with database.xml's
+        // PluginName, in name order, so after an update from a plugin repository it first loads the old version
+        // (<name>_<old version> sorts before <name>_<new version>). Later in the same start its plugin manager deletes
+        // the old folder and loads the new assembly, and the second load of the database provider then fails with
+        // "Assembly with same name is already loaded". Stop before anything runs on the old version instead, and
+        // remove it, so that the next start loads the new one.
+        string assemblyFile = typeof(PgSqlDatabaseProvider).Assembly.Location;
+        string? ownFolder = Path.GetDirectoryName(assemblyFile);
+
+        // The design-time factory (dotnet ef) has no application paths.
+        if (_applicationPaths is null || string.IsNullOrEmpty(ownFolder) || !Directory.Exists(_applicationPaths.PluginsPath))
+        {
+            return;
+        }
+
+        var ownVersion = typeof(PgSqlDatabaseProvider).Assembly.GetName().Version;
+        var others = new List<(string Folder, Version? Version)>();
+        foreach (var folder in Directory.EnumerateDirectories(_applicationPaths.PluginsPath))
+        {
+            // A version set aside by an earlier start (see below); this process does not use it.
+            var name = Path.GetFileName(folder);
+            if (name.StartsWith('.') && name.EndsWith(".superseded", StringComparison.Ordinal))
+            {
+                try
+                {
+                    Directory.Delete(folder, true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    _logger.LogDebug(ex, "Could not remove {Folder}", folder);
+                }
+
+                continue;
+            }
+
+            var candidate = Path.Combine(folder, Path.GetFileName(assemblyFile));
+            if (string.Equals(Path.GetFullPath(folder), Path.GetFullPath(ownFolder), StringComparison.Ordinal) || !File.Exists(candidate))
+            {
+                continue;
+            }
+
+            Version? version = null;
+            try
+            {
+                version = AssemblyName.GetAssemblyName(candidate).Version;
+            }
+            catch (BadImageFormatException)
+            {
+            }
+            catch (IOException)
+            {
+            }
+
+            others.Add((folder, version));
+        }
+
+        if (others.Count == 0)
+        {
+            return;
+        }
+
+        var newer = others.Where(e => e.Version is not null && ownVersion is not null && e.Version > ownVersion).OrderByDescending(e => e.Version).FirstOrDefault();
+
+        // The Docker image's own folder: its entrypoint removes other copies, so there is nothing to do here.
+        if (newer.Folder is null || string.Equals(Path.GetFileName(ownFolder), "PostgreSQL", StringComparison.Ordinal))
+        {
+            _logger.LogWarning(
+                "The PostgreSQL provider {Version} was loaded from {Folder}, but other copies of it are installed in {Others}. Remove the copies that are not in use",
+                ownVersion,
+                ownFolder,
+                string.Join(", ", others.Select(e => e.Folder)));
+            return;
+        }
+
+        // Rename rather than delete: the old version's files stay in place while this process still uses them, its
+        // folder no longer matches PluginName, and Jellyfin's plugin manager removes it as a superseded version.
+        string message;
+        try
+        {
+            var retired = Path.Combine(Path.GetDirectoryName(ownFolder)!, "." + Path.GetFileName(ownFolder) + ".superseded");
+            if (Directory.Exists(retired))
+            {
+                Directory.Delete(retired, true);
+            }
+
+            Directory.Move(ownFolder, retired);
+            message = string.Format(
+                CultureInfo.InvariantCulture,
+                "The PostgreSQL plugin was updated from {0} to {1}, but Jellyfin loaded the old version from {2} first. The old version has been set aside; start Jellyfin again to run {1}.",
+                ownVersion,
+                newer.Version,
+                ownFolder);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            message = string.Format(
+                CultureInfo.InvariantCulture,
+                "The PostgreSQL plugin was updated from {0} to {1}, but Jellyfin loaded the old version from {2} first and it could not be set aside ({3}). Delete that folder, then start Jellyfin again.",
+                ownVersion,
+                newer.Version,
+                ownFolder,
+                ex.Message);
+        }
+
+        _logger.LogCritical("{Message}", message);
+        throw new InvalidOperationException(message);
     }
 
     private static Task<bool> HasLibraryItemsAsync(JellyfinDbContext context, CancellationToken cancellationToken)
