@@ -54,6 +54,13 @@ jobs:
           sha="$(git rev-parse --verify "${REF}^{commit}")"
           # The multi-arch digest is the SHA-256 of the image index as stored in the registry.
           digest="sha256:$(skopeo inspect --raw --creds "${ACTOR}:${GH_TOKEN}" "docker://${image}:${TAG}" | sha256sum | cut -d' ' -f1)"
+          # Builds that published a plugin package keep its line in the notes.
+          zip="$(gh release view "$TAG" --json assets --jq '.assets[].name | select(test("^jellyfin-pgsql_.*\\.zip$"))' 2>/dev/null | head -1 || true)"
+          if [[ -n "$zip" ]]; then
+            PLUGIN_VERSION="${zip#jellyfin-pgsql_}"
+            export PLUGIN_VERSION="${PLUGIN_VERSION%.zip}"
+            export PLUGIN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/${zip}"
+          fi
           .github/scripts/release_notes.sh "$TAG" "$sha" "$image" "$digest" "$PREVIOUS" > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
           if gh release view "$TAG" >/dev/null 2>&1; then

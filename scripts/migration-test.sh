@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# End-to-end test of scripts/migrate-sqlite-to-postgres.sh: sets up a stock Jellyfin on SQLite with a small
-# library and user state, migrates it into PostgreSQL, starts the Jellyfin.Pgsql image on the migrated config and
-# checks that users, library, watch state and edge-case rows came across and that new rows can be inserted.
+# End-to-end test of scripts/migrate-sqlite-to-postgres.sh and back with scripts/migrate-postgres-to-sqlite.py: sets
+# up a stock Jellyfin on SQLite with a small library and user state, migrates it into PostgreSQL, starts the
+# Jellyfin.Pgsql image on the migrated config and checks that users, library, watch state and edge-case rows came
+# across and that new rows can be inserted; then copies PostgreSQL back into a stock SQLite database and checks the
+# same on a stock Jellyfin, including the rows PostgreSQL wrote.
 #
 #   IMAGE=jellyfin-pgsql:test scripts/migration-test.sh
 #
@@ -11,7 +13,7 @@
 #   PG_IMAGE       PostgreSQL server image (default postgres:18)
 #   LOG_DIR        where logs are written (default ./migration-logs)
 #   PORT, PG_PORT  host ports for Jellyfin and PostgreSQL (default 8097 and 55432)
-# Needs docker, sqlite3, psql, jq and pgloader (or PGLOADER_IMAGE) on the host.
+# Needs docker, sqlite3, psql, jq, pgloader (or PGLOADER_IMAGE) and python3 with psycopg 3 on the host.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -198,6 +200,81 @@ if grep -E '\[FTL\]|\[ERR\].*(Pgsql|EntityFrameworkCore|Jellyfin\.Database)|Post
     fail "database errors in the Jellyfin log"
 fi
 grep -q 'PgSqlDatabaseProvider: PostgreSQL connection string' "$LOG_DIR/jellyfin.log" || fail "the server is not running on PostgreSQL"
+pg_api_keys="$(psql_q 'SELECT count(*) FROM "ApiKeys"')"
+stop_jellyfin jellyfin-postgres
 endstep
 
-echo "MIGRATION TEST PASSED ($SQLITE_IMAGE on SQLite -> $IMAGE on $PG_IMAGE)"
+step "Switching back: seeding a stock SQLite database with $SQLITE_IMAGE"
+mkdir -p "$WORK/back-seed"
+start_jellyfin "$SQLITE_IMAGE" "$WORK/back-seed"
+stop_jellyfin jellyfin-back-seed
+endstep
+
+step "Copying PostgreSQL back into SQLite"
+POSTGRES_HOST=127.0.0.1 POSTGRES_PORT="$PG_PORT" POSTGRES_DB=jellyfin POSTGRES_USER=jellyfin POSTGRES_PASSWORD=jellyfin \
+    python3 scripts/migrate-postgres-to-sqlite.py "$WORK/back-seed/data/jellyfin.db" "$WORK/back.db" 2>&1 | tee "$LOG_DIR/migrate-back.log"
+grep -q 'MIGRATION COMPLETE' "$LOG_DIR/migrate-back.log" || fail "the PostgreSQL to SQLite script did not complete"
+endstep
+
+step "Comparing the converted database with the original SQLite file"
+# Every column of the converted file may only hold the storage classes and value shapes (upper-case GUID text,
+# "yyyy-MM-dd HH:mm:ss" timestamps, ...) that the original file uses for it, also in rows PostgreSQL wrote.
+python3 - "$SQLITE_DB.migrated" "$WORK/back.db" <<'PY' || fail "the converted database stores values differently from stock Jellyfin"
+import re, sqlite3, sys
+SHAPES = [("guid", r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"),
+          ("guid-lower", r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+          ("timestamp", r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{1,7})?"),
+          ("timestamp-iso", r"\d{4}-\d{2}-\d{2}T.*"), ("json-array", r"\[.*\]")]
+def shape(value):
+    if not isinstance(value, str):
+        return type(value).__name__
+    return next((name for name, pattern in SHAPES if re.fullmatch(pattern, value)), "text")
+def shapes(path):
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    result = {}
+    for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"):
+        for column in [r[1] for r in db.execute(f'PRAGMA table_info("{table}")')]:
+            result[(table, column)] = {shape(v) for (v,) in db.execute(f'SELECT "{column}" FROM "{table}"') if v is not None}
+    return result
+original, converted = shapes(sys.argv[1]), shapes(sys.argv[2])
+problems = [f"{t}.{c}: {sorted(s - original.get((t, c), set()))} not used by the original {sorted(original.get((t, c), set()))}"
+            for (t, c), s in converted.items() if original.get((t, c)) and not s <= original[(t, c)]]
+print("\n".join(problems) or f"{len(converted)} columns: storage classes and value shapes match the original file")
+sys.exit(1 if problems else 0)
+PY
+endstep
+
+step "Starting $SQLITE_IMAGE on the converted database"
+cp "$WORK/back.db" "$SQLITE_DB"
+mv "$WORK/sqlite-config/config/database.xml.sqlite" "$WORK/sqlite-config/config/database.xml"
+rm -rf "$WORK/sqlite-config/plugins/PostgreSQL"
+start_jellyfin "$SQLITE_IMAGE" "$WORK/sqlite-config"
+login
+movies="$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie' | jq .TotalRecordCount)"
+favourites="$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie&Filters=IsFavorite' | jq .TotalRecordCount)"
+played="$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie&Filters=IsPlayed' | jq .TotalRecordCount)"
+echo "movies: $movies, favourites: $favourites (one set on PostgreSQL), played: $played"
+[[ "$movies" == "${#MOVIES[@]}" && "$favourites" == "2" && "$played" == "1" ]] || fail "library or user state did not come back to SQLite"
+# Writes on SQLite: updating rows PostgreSQL wrote, and new rows after the ids PostgreSQL used.
+api DELETE "/UserFavoriteItems/$(movie_id 2)" >/dev/null
+api POST /Auth/Keys?app=switch-back-test >/dev/null
+stop_jellyfin jellyfin-back
+[[ "$(sqlite3 "$SQLITE_DB" 'SELECT count(*) FROM ApiKeys')" == "$(( pg_api_keys + 1 ))" ]] || fail "an API key created after switching back was not stored"
+start_jellyfin "$SQLITE_IMAGE" "$WORK/sqlite-config"
+login
+[[ "$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie&Filters=IsFavorite' | jq .TotalRecordCount)" == "1" ]] \
+    || fail "a favourite removed after switching back was not stored"
+docker logs "$JF" >"$LOG_DIR/jellyfin-sqlite-back.log" 2>&1
+cat "$LOG_DIR/jellyfin-back.log" >>"$LOG_DIR/jellyfin-sqlite-back.log"
+if grep -E '\[FTL\]|\[ERR\].*(EntityFrameworkCore|Jellyfin\.Database|Sqlite)|SqliteException|DbUpdateException' \
+    "$LOG_DIR/jellyfin-sqlite-back.log" >"$LOG_DIR/db-errors-back.log"; then
+    cat "$LOG_DIR/db-errors-back.log" >&2
+    fail "database errors in the log of the switched-back server"
+fi
+if grep -q 'Perform migration' "$LOG_DIR/jellyfin-sqlite-back.log"; then
+    grep 'Perform migration' "$LOG_DIR/jellyfin-sqlite-back.log" >&2
+    fail "the switched-back database still had migrations to run"
+fi
+endstep
+
+echo "MIGRATION TEST PASSED ($SQLITE_IMAGE on SQLite -> $IMAGE on $PG_IMAGE -> $SQLITE_IMAGE on SQLite)"
