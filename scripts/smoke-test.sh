@@ -148,7 +148,7 @@ check_data() {
 }
 
 check_sqlite_compatibility() {
-    local order infinite
+    local order infinite found
     order="$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie&SortBy=PremiereDate&SortOrder=Ascending' | jq -r '[.Items[].Name] | join(",")')"
     [[ "$order" == "$EXPECTED_PREMIERE_ORDER" ]] \
         || fail "movies by PremiereDate: expected $EXPECTED_PREMIERE_ORDER (SQLite order), got $order"
@@ -157,11 +157,39 @@ check_sqlite_compatibility() {
         FROM information_schema.columns WHERE table_schema = 'public'
         AND data_type IN ('timestamp with time zone', 'timestamp without time zone', 'date')")"
     [[ "$infinite" == "0" ]] || fail "$infinite infinite timestamp values stored in PostgreSQL"
+    # Jellyfin matches the mixed-case OriginalTitle with EF.Functions.Like, which ignores case on SQLite.
+    psql_q "UPDATE \"BaseItems\" SET \"OriginalTitle\" = 'Zebra Crossing' WHERE \"Name\" = 'Smoke Test (2020)'" >/dev/null
+    found="$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie&searchTerm=zebra' | jq -r '[.Items[].Name] | join(",")')"
+    [[ "$found" == "Smoke Test (2020)" ]] || fail "searching 'zebra' did not find the movie with OriginalTitle 'Zebra Crossing' (got: $found)"
     grep -q 'PostgreSQL connection string: .*jit=off' "$LOG_DIR/jellyfin.log" || fail "connection does not set jit=off"
     if docker exec "$JF" grep -qi 'password' "$DATABASE_XML"; then
         fail "$DATABASE_XML contains the database password"
     fi
-    echo "PremiereDate order: $order | infinite timestamps: $infinite | jit=off | no password in $DATABASE_XML"
+    echo "PremiereDate order: $order | case-insensitive LIKE | infinite timestamps: $infinite | jit=off | no password in $DATABASE_XML"
+}
+
+check_statistics() {
+    # Jellyfin runs RefreshStatistics after every library scan; the plugin answers it with ANALYZE.
+    for _ in $(seq 1 60); do
+        if [[ "$(psql_q "SELECT last_analyze IS NOT NULL FROM pg_stat_user_tables WHERE relname = 'BaseItems'")" == "t" ]]; then
+            echo "BaseItems analyzed after the library scan"
+            return 0
+        fi
+        sleep 2
+    done
+    fail "BaseItems was not analyzed within 120s of the library scan (RefreshStatistics)"
+}
+
+check_kept_backup() {
+    # Jellyfin deletes the pre-migration backup once the migrations succeed; the plugin keeps the newest one.
+    local backup
+    backup="$(sed -n 's/.*Starting PostgreSQL backup: \(.*\.sql\).*/\1/p' "$LOG_DIR/jellyfin.log" | tail -1)"
+    if [[ -z "$backup" ]]; then
+        echo "no migration ran, so no pre-migration backup was taken"
+        return 0
+    fi
+    docker exec "$JF" test -s "$backup" || fail "the pre-migration backup $backup was not kept"
+    echo "pre-migration backup kept: $backup"
 }
 
 check_logs() {
@@ -228,6 +256,7 @@ else
     run_wizard
     login
     add_library_and_scan
+    check_statistics
     endstep
 fi
 
@@ -241,6 +270,7 @@ docker exec "$JF" sh -c 'pg_dump --version && psql --version'
 check_data
 check_logs
 check_sqlite_compatibility
+check_kept_backup
 endstep
 
 # Mirrors PgSqlDatabaseProvider.MigrationBackupFast / RestoreBackupFast; keep the arguments in sync.

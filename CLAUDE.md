@@ -23,7 +23,7 @@ built on `jellyfin/jellyfin`.
   Never edit migrations that were already released.
 - Raw SQL in upstream SQLite migrations is not carried over by EF; port data fixes to PostgreSQL syntax by hand.
 - The pg_dump/psql arguments in `scripts/smoke-test.sh` mirror `PgSqlDatabaseProvider`; keep them in sync.
-- Keep PostgreSQL behaving like SQLite where Jellyfin depends on it (NULL ordering, `DateTime.MinValue`, no JIT; see
+- Keep PostgreSQL behaving like SQLite where Jellyfin depends on it (NULL ordering, case-insensitive `LIKE`, `DateTime.MinValue`, no JIT; see
   "Differences from SQLite" in the README). The smoke test checks these.
 - Every merge to master that changes the plugin or Docker files is published automatically (Docker workflow after
   Verify): `<version>-<n>` plus the moving `<version>` and `latest` tags, a git tag and a GitHub release whose notes list new
