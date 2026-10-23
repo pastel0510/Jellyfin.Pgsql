@@ -148,7 +148,7 @@ check_data() {
 }
 
 check_sqlite_compatibility() {
-    local order infinite found
+    local order infinite nonfinite found
     order="$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie&SortBy=PremiereDate&SortOrder=Ascending' | jq -r '[.Items[].Name] | join(",")')"
     [[ "$order" == "$EXPECTED_PREMIERE_ORDER" ]] \
         || fail "movies by PremiereDate: expected $EXPECTED_PREMIERE_ORDER (SQLite order), got $order"
@@ -157,6 +157,11 @@ check_sqlite_compatibility() {
         FROM information_schema.columns WHERE table_schema = 'public'
         AND data_type IN ('timestamp with time zone', 'timestamp without time zone', 'date')")"
     [[ "$infinite" == "0" ]] || fail "$infinite infinite timestamp values stored in PostgreSQL"
+    nonfinite="$(psql_q "SELECT coalesce(sum((xpath('/row/n/text()', query_to_xml(format(
+        'SELECT count(*) AS n FROM %I WHERE %I IN (''NaN'', ''Infinity'', ''-Infinity'')', table_name, column_name), false, true, '')))[1]::text::int), 0)
+        FROM information_schema.columns WHERE table_schema = 'public' AND is_nullable = 'YES'
+        AND data_type IN ('real', 'double precision')")"
+    [[ "$nonfinite" == "0" ]] || fail "$nonfinite NaN or infinite float values stored in PostgreSQL"
     # Jellyfin matches the mixed-case OriginalTitle with EF.Functions.Like, which ignores case on SQLite.
     psql_q "UPDATE \"BaseItems\" SET \"OriginalTitle\" = 'Zebra Crossing' WHERE \"Name\" = 'Smoke Test (2020)'" >/dev/null
     found="$(api GET '/Items?Recursive=true&IncludeItemTypes=Movie&searchTerm=zebra' | jq -r '[.Items[].Name] | join(",")')"
@@ -165,7 +170,7 @@ check_sqlite_compatibility() {
     if docker exec "$JF" grep -qi 'password' "$DATABASE_XML"; then
         fail "$DATABASE_XML contains the database password"
     fi
-    echo "PremiereDate order: $order | case-insensitive LIKE | infinite timestamps: $infinite | jit=off | no password in $DATABASE_XML"
+    echo "PremiereDate order: $order | case-insensitive LIKE | infinite timestamps: $infinite | non-finite floats: $nonfinite | jit=off | no password in $DATABASE_XML"
 }
 
 check_statistics() {
@@ -242,6 +247,11 @@ if [[ -n "${UPGRADE_FROM:-}" ]]; then
     if [[ "$(psql_q "SELECT count(*) FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" LIKE '%DateTimeInfinity'")" == "0" ]]; then
         psql_q "UPDATE \"Users\" SET \"LastActivityDate\" = '-infinity'" >/dev/null
         echo "planted -infinity in Users.LastActivityDate"
+    fi
+    # PostgreSQL keeps NaN in float columns (SQLite stores NULL); the Jellyfin12.3_NonFiniteFloats migration clears it.
+    if [[ "$(psql_q "SELECT count(*) FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" LIKE '%NonFiniteFloats'")" == "0" ]]; then
+        psql_q "UPDATE \"BaseItems\" SET \"CommunityRating\" = 'NaN' WHERE \"Name\" = 'Older Test (2010)'" >/dev/null
+        echo "planted NaN in BaseItems.CommunityRating"
     fi
     # Two user data rows of one item that only differ in Played: Jellyfin 12.2's HarmonizeConflictingUserData can
     # copy the unplayed one over the played one. The Jellyfin12.2_HarmonizeUserData migration resolves them first.
