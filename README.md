@@ -22,7 +22,7 @@ This plugin adds postgres SQL support to [Jellyfin Server](https://github.com/je
 
 # How to use it
 
-You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/pastel0510/jellyfin.pgsql:12.2`.
+You can use your existing Jellyfin compose file and change the image accordingly to: `ghcr.io/pastel0510/jellyfin.pgsql:12.3`.
 
 Images are published automatically whenever a change to the plugin or the image is merged. Each build gets a fixed tag
 `<version>-<n>` (for example `12.1-2`) and a [release](https://github.com/pastel0510/Jellyfin.Pgsql/releases) whose notes
@@ -34,7 +34,7 @@ You need to add the connection parameters as environment variables in your compo
 ```yaml
 services:
   jellyfin:
-    image: ghcr.io/pastel0510/jellyfin.pgsql:12.2
+    image: ghcr.io/pastel0510/jellyfin.pgsql:12.3
     volumes:
       - /path/to/config:/config
       - /path/to/cache:/cache
@@ -59,7 +59,7 @@ The password is only read from the environment. On every start the entrypoint re
 
 ### Upgrading and pinning
 
-`ghcr.io/pastel0510/jellyfin.pgsql:12.2` is fine for trying the image. For a server you rely on, pin the exact build
+`ghcr.io/pastel0510/jellyfin.pgsql:12.3` is fine for trying the image. For a server you rely on, pin the exact build
 and its digest as given in the release notes (`ghcr.io/pastel0510/jellyfin.pgsql:<version>-<n>@sha256:...`): with a
 moving tag, a restart can silently pull a build that adds a database migration. Migrations run on the first start of
 the new image and cannot be undone by going back to an older image, so before moving to a new build read its release
@@ -168,7 +168,7 @@ copies on start.
 
 ## PostgreSQL version
 
-The image is built on Jellyfin 12.2 and ships the PostgreSQL 18 client tools. Jellyfin takes a `pg_dump` backup before
+The image is built on Jellyfin 12.3 and ships the PostgreSQL 18 client tools. Jellyfin takes a `pg_dump` backup before
 every database migration, and `pg_dump` refuses to dump a server newer than itself, so use a PostgreSQL server
 **version 18 or older** (18 recommended; see [`docker/docker-compose.yaml`](docker/docker-compose.yaml)). PostgreSQL 16 is
 confirmed working, including with a non-superuser role that owns the database, and on a 3-instance CloudNativePG cluster
@@ -239,7 +239,14 @@ a specific tag). When a newer stable Jellyfin release has its Docker image and N
    and a checklist of the upstream changes it reviewed.
 
 One-time setup:
-- Actions > enable workflows (forks start with them disabled).
+- Actions > enable workflows (forks start with them disabled). GitHub can disable them on a fork again later ("Workflows
+  on this fork have been disabled") when it sees runs it considers wasted, typically workflows inherited from the
+  upstream repository; this repository only keeps the six workflows it uses (Verify, Build & Publish Docker Image,
+  Jellyfin Update, Claude Check, Release Notes, Secret Scan). If it happens, re-enable them on the Actions tab. Detaching
+  the repository from the fork network ("Leave fork network" under Settings > General > Danger Zone where GitHub offers
+  it, otherwise through GitHub Support) avoids it for good.
+- The daily Jellyfin Update re-enables its own schedule on every run, so GitHub's 60-day inactivity rule for scheduled
+  workflows does not stop it.
 - Settings > Actions > General > Workflow permissions > allow GitHub Actions to create and approve pull requests.
 - Settings > Secrets and variables > Actions > add `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or
   `ANTHROPIC_API_KEY`. Without it the workflow still bumps and verifies, but cannot fix failures.

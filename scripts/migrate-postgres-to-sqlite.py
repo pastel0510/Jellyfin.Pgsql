@@ -32,6 +32,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -65,9 +66,14 @@ def version_key(version: str) -> tuple[int, ...]:
     return tuple(int(p) for p in version.split("."))
 
 
-def float32(value: float) -> float:
+def float32(value: float) -> float | None:
     # EF reads a float column back as the double of the stored float32, which is what Jellyfin's SQLite file holds.
-    return struct.unpack("<f", struct.pack("<f", value))[0]
+    return struct.unpack("<f", struct.pack("<f", value))[0] if math.isfinite(value) else None
+
+
+def float64(value: float) -> float | None:
+    # SQLite stores NaN as NULL; write NULL for infinity too, as Jellyfin 12.3 does for ratings and gains.
+    return float(value) if math.isfinite(value) else None
 
 
 def timestamp(value: datetime.datetime) -> str:
@@ -86,7 +92,7 @@ def converter(udt_name: str):
         "timestamp": timestamp,
         "bool": int,
         "float4": float32,
-        "float8": float,
+        "float8": float64,
         "_int8": lambda v: json.dumps(v, separators=(",", ":")),
         "_int4": lambda v: json.dumps(v, separators=(",", ":")),
         "bytea": bytes,

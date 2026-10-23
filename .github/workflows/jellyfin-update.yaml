@@ -30,6 +30,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      actions: write
     outputs:
       run: ${{ steps.check.outputs.run }}
       tag: ${{ steps.check.outputs.tag }}
@@ -41,6 +42,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # GitHub disables scheduled workflows after 60 days without repository activity, which would silently stop
+      # this check while no Jellyfin release (and so no commit) comes. Re-enabling it from its own run resets that.
+      - name: Keep the daily schedule enabled
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/jellyfin-update.yaml/enable"
 
       - name: Check for a new Jellyfin release
         id: check
