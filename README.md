@@ -239,7 +239,14 @@ a specific tag). When a newer stable Jellyfin release has its Docker image and N
    and a checklist of the upstream changes it reviewed.
 
 One-time setup:
-- Actions > enable workflows (forks start with them disabled).
+- Actions > enable workflows (forks start with them disabled). GitHub can disable them on a fork again later ("Workflows
+  on this fork have been disabled") when it sees runs it considers wasted, typically workflows inherited from the
+  upstream repository; this repository only keeps the six workflows it uses (Verify, Build & Publish Docker Image,
+  Jellyfin Update, Claude Check, Release Notes, Secret Scan). If it happens, re-enable them on the Actions tab. Detaching
+  the repository from the fork network ("Leave fork network" under Settings > General > Danger Zone where GitHub offers
+  it, otherwise through GitHub Support) avoids it for good.
+- The daily Jellyfin Update re-enables its own schedule on every run, so GitHub's 60-day inactivity rule for scheduled
+  workflows does not stop it.
 - Settings > Actions > General > Workflow permissions > allow GitHub Actions to create and approve pull requests.
 - Settings > Secrets and variables > Actions > add `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or
   `ANTHROPIC_API_KEY`. Without it the workflow still bumps and verifies, but cannot fix failures.
