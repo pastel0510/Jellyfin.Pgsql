@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Build stage
 # Context hint: project root ../
-# sudo docker build -t ghcr.io/pastel0510/jellyfin.pgsql:12.3 -f ./Dockerfile ../
+# sudo docker build -t ghcr.io/pastel0510/jellyfin.pgsql:12.4 -f ./Dockerfile ../
 # The plugin is a framework-dependent, RID-neutral net10.0 library, so it is built once on the
 # native build platform and reused for every target architecture (no QEMU for the compile).
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
@@ -20,7 +20,7 @@ RUN dotnet restore Jellyfin.Plugin.Pgsql.sln
 RUN dotnet publish Jellyfin.Plugin.Pgsql.sln -c Release --no-restore -p:Version=${PLUGIN_VERSION} -o /app/publish
 
 # Final stage - Jellyfin with plugin
-FROM jellyfin/jellyfin:12.3
+FROM jellyfin/jellyfin:12.4
 
 # Install the PostgreSQL 18 client tools (pg_dump/psql) used for the pre-migration backup/restore.
 # pg_dump refuses to dump a server newer than itself, so this major version is the newest
