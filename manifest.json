@@ -8,6 +8,14 @@
         "category": "General",
         "versions": [
             {
+                "version": "12.4.2.0",
+                "changelog": "Image 12.4-2 (Jellyfin 12.4). Release notes: https://github.com/pastel0510/Jellyfin.Pgsql/releases/tag/12.4-2",
+                "targetAbi": "12.4.0.0",
+                "sourceUrl": "https://github.com/pastel0510/Jellyfin.Pgsql/releases/download/12.4-2/jellyfin-pgsql_12.4.2.0.zip",
+                "checksum": "eac18feef9d16ce5eb2cc03bb730d4d2",
+                "timestamp": "2026-11-12T08:00:12Z"
+            },
+            {
                 "version": "12.4.1.0",
                 "changelog": "Image 12.4-1 (Jellyfin 12.4). Release notes: https://github.com/pastel0510/Jellyfin.Pgsql/releases/tag/12.4-1",
                 "targetAbi": "12.4.0.0",
