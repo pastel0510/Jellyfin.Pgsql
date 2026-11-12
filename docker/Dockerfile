@@ -22,6 +22,8 @@ RUN dotnet publish Jellyfin.Plugin.Pgsql.sln -c Release --no-restore -p:Version=
 # Final stage - Jellyfin with plugin
 FROM jellyfin/jellyfin:12.4
 
+COPY --chmod=755 docker/debian-updates.sh /jellyfin-pgsql/debian-updates.sh
+
 # Install the PostgreSQL 18 client tools (pg_dump/psql) used for the pre-migration backup/restore.
 # pg_dump refuses to dump a server newer than itself, so this major version is the newest
 # PostgreSQL server the image can back up. Uses the PGDG repo for the base image's Debian release
@@ -37,6 +39,8 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends postgresql-client-18 xmlstarlet; \
     pg_dump --version; \
+    # Debian updates released after the base image was built (the Docker workflow rebuilds weekly for them).
+    /jellyfin-pgsql/debian-updates.sh upgrade; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 

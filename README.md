@@ -303,6 +303,12 @@ Images are built and published by the [Build & Publish Docker Image](.github/wor
 4. The plugin package is added to [`manifest.json`](manifest.json), the plugin repository manifest, with a commit to
    `master`.
 
+Every Sunday the same workflow checks whether upstream published a new `jellyfin/jellyfin` base image for the current
+version, or whether the published image has Debian package updates (each build also installs the Debian updates
+available at the time). If so, it publishes a new `<version>-<n>` with the same plugin, whose release notes say why; if
+not, it publishes nothing. These rebuilds add no database migrations, are not offered to plugin repository installs,
+and keep pinned deployments' choice explicit: move to the new digest to get the updated packages.
+
 New Jellyfin versions arrive through the [automated update](#automated-jellyfin-updates) pull request. A database
 migration is added when the Jellyfin data model changes (see [Add migration](#add-migration)).
 [Release Notes](.github/workflows/release-notes.yaml) can (re)create the release of an already published build.

@@ -1,9 +1,13 @@
 name: 'Build & Publish Docker Image'
 
 # Publishes ghcr.io/<owner>/jellyfin.pgsql:<jellyfin version>-<n> plus the moving tags <jellyfin version> and latest:
-# automatically after Verify passes on master when the image changed, and on demand. Each published build also gets a
-# git tag and a GitHub release whose notes list the changes and any new database migration.
+# automatically after Verify passes on master when the image changed, weekly when the base image or its Debian packages
+# have updates, and on demand. Each published build also gets a git tag and a GitHub release whose notes list the changes
+# and any new database migration.
 on:
+  schedule:
+    - cron: '37 2 * * 0'
+
   workflow_run:
     workflows:
       - Verify
@@ -32,16 +36,26 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: read
+      actions: write
     outputs:
       publish: ${{ steps.changes.outputs.publish }}
+      reason: ${{ steps.changes.outputs.reason }}
     steps:
       - name: Checkout repository
-        if: github.event_name == 'workflow_run'
+        if: github.event_name == 'workflow_run' || github.event_name == 'schedule'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 2
           persist-credentials: false
+
+      # GitHub disables scheduled workflows after 60 days without repository activity; re-enabling from the run resets it.
+      - name: Keep the weekly schedule enabled
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/docker.yaml/enable"
 
       - name: Decide whether to build
         id: changes
@@ -49,10 +63,32 @@ jobs:
           EVENT: ${{ github.event_name }}
           VERIFY_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           VERIFY_EVENT: ${{ github.event.workflow_run.event }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           publish=true
-          if [[ "$EVENT" == "workflow_run" ]]; then
+          reason=""
+          if [[ "$EVENT" == "schedule" ]]; then
+            # Weekly: rebuild when upstream published a new base image (its digest differs from the one the current
+            # build records) or when the published image has Debian package updates. Otherwise nothing would change.
+            image="ghcr.io/${OWNER,,}/jellyfin.pgsql"
+            version="$(grep -oP '^FROM jellyfin/jellyfin:\K\S+' docker/Dockerfile)"
+            base_digest="sha256:$(skopeo inspect --raw "docker://docker.io/jellyfin/jellyfin:${version}" | sha256sum | cut -d' ' -f1)"
+            built_on="$(skopeo inspect "docker://${image}:${version}" 2>/dev/null | jq -r '.Labels["org.opencontainers.image.base.digest"] // empty' || true)"
+            echo "base image jellyfin/jellyfin:${version} is ${base_digest}; ${image}:${version} was built on ${built_on:-an unrecorded base}"
+            if [[ "$built_on" != "$base_digest" ]]; then
+              reason="Rebuilt on the current jellyfin/jellyfin:${version} base image (${base_digest:0:19})."
+            else
+              updates="$(docker run --rm --pull always --entrypoint /jellyfin-pgsql/debian-updates.sh "${image}:${version}" check 2>/dev/null | tail -1 || echo unknown)"
+              echo "Debian package updates pending in ${image}:${version}: ${updates}"
+              if [[ "$updates" =~ ^[0-9]+$ && "$updates" -eq 0 ]]; then
+                echo "::notice::Base image and Debian packages are current; not publishing"
+                publish=false
+              else
+                reason="Rebuilt with Debian package updates (${updates} pending in the previous build)."
+              fi
+            fi
+          elif [[ "$EVENT" == "workflow_run" ]]; then
             # Only a successful Verify of a push to master, and only when the commit changed what goes into the image.
             if [[ "$VERIFY_CONCLUSION" != "success" || "$VERIFY_EVENT" != "push" ]]; then
               echo "::notice::Verify was $VERIFY_CONCLUSION for a $VERIFY_EVENT event; not publishing"
@@ -62,7 +98,10 @@ jobs:
               publish=false
             fi
           fi
-          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          {
+            echo "publish=$publish"
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
 
   build-and-push:
     needs: changes
@@ -121,11 +160,14 @@ jobs:
           # that it only goes up (publishes are serialised, so the manifest there is current).
           git show origin/master:manifest.json > "$RUNNER_TEMP/manifest.json" 2>/dev/null || cp manifest.json "$RUNNER_TEMP/manifest.json"
           PLUGIN_VERSION="$(python3 .github/scripts/plugin_manifest.py next-version "$RUNNER_TEMP/manifest.json" "$JELLYFIN_VERSION" "$(( ${MAX_ROLLING:-0} + 1 ))")"
+          # Recorded as a label, so the weekly check can tell when upstream published a new base image.
+          BASE_DIGEST="sha256:$(skopeo inspect --raw "docker://docker.io/jellyfin/jellyfin:${JELLYFIN_VERSION}" | sha256sum | cut -d' ' -f1)"
           {
             echo "image=$IMAGE"
             echo "jellyfin_version=$JELLYFIN_VERSION"
             echo "image_tag=$IMAGE_TAG"
             echo "plugin_version=$PLUGIN_VERSION"
+            echo "base_digest=$BASE_DIGEST"
           } >> "$GITHUB_OUTPUT"
           echo "Computed image: ${IMAGE}:${IMAGE_TAG}, plugin version ${PLUGIN_VERSION}"
 
@@ -142,6 +184,8 @@ jobs:
           labels: |
             org.opencontainers.image.title=Jellyfin PostgreSQL
             org.opencontainers.image.description=Jellyfin with the experimental PostgreSQL database provider plugin
+            org.opencontainers.image.base.name=docker.io/jellyfin/jellyfin:${{ steps.version.outputs.jellyfin_version }}
+            org.opencontainers.image.base.digest=${{ steps.version.outputs.base_digest }}
           annotations: |
             org.opencontainers.image.description=Jellyfin with the experimental PostgreSQL database provider plugin
 
@@ -177,9 +221,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Weekly rebuilds change only the image's operating system packages, not the plugin; offering them to plugin
+      # repository installs would only make those servers restart for nothing.
       - name: Package the plugin for installs without Docker
         id: package
-        if: env.PUSH == 'true'
+        if: env.PUSH == 'true' && github.event_name != 'schedule'
         env:
           IMAGE: ${{ steps.version.outputs.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -212,16 +258,23 @@ jobs:
           PLUGIN_VERSION: ${{ steps.version.outputs.plugin_version }}
           PLUGIN_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.version.outputs.image_tag }}/${{ steps.package.outputs.zip_name }}
           ZIP: ${{ steps.package.outputs.zip }}
+          REBUILD_REASON: ${{ needs.changes.outputs.reason }}
         run: |
           set -euo pipefail
           sha="$(git rev-parse HEAD)"
+          assets=()
+          if [[ -n "$ZIP" ]]; then
+            assets+=("$ZIP")
+          else
+            unset PLUGIN_VERSION PLUGIN_URL
+          fi
           .github/scripts/release_notes.sh "$TAG" "$sha" "$IMAGE" "$DIGEST" > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
-          gh release create "$TAG" "$ZIP" --target "$sha" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest="$LATEST"
+          gh release create "$TAG" "${assets[@]}" --target "$sha" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest="$LATEST"
 
       - name: Add the build to the plugin repository manifest
         # Only builds of master; the manifest lists what a plugin repository offers for updates.
-        if: env.PUSH == 'true' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master')
+        if: env.PUSH == 'true' && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.image_tag }}
