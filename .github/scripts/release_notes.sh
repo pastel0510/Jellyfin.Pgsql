@@ -74,9 +74,20 @@ if [[ -s "$KNOWN_ISSUES" ]]; then
     echo
 fi
 
+# Set by the Docker workflow for its weekly rebuilds.
+if [[ -n "${REBUILD_REASON:-}" ]]; then
+    echo "## Rebuild"
+    echo
+    echo "${REBUILD_REASON}"
+    echo
+fi
+
 if [[ -n "$PREVIOUS" ]]; then
     echo "## Changes since ${PREVIOUS}"
     echo
+    if [[ -z "$(git rev-list --first-parent "$PREVIOUS..$SHA")" ]]; then
+        echo "- No code changes."
+    fi
     while read -r commit; do
         subject="$(git log -1 --format=%s "$commit")"
         if [[ "$subject" =~ ^Merge\ pull\ request\ \#([0-9]+) ]]; then
